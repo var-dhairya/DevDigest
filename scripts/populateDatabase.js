@@ -1,0 +1,401 @@
+import dotenv from 'dotenv'
+import { fileURLToPath } from 'url'
+import { dirname, join } from 'path'
+
+// Load environment variables
+const __filename = fileURLToPath(import.meta.url)
+const __dirname = dirname(__filename)
+dotenv.config({ path: join(__dirname, '.env.local') })
+
+console.log('🚀 Starting expanded database setup...')
+
+async function expandedSetup() {
+  try {
+    console.log('1️⃣ Connecting to MongoDB...')
+    const { connectDB } = await import('./lib/database.js')
+    await connectDB()
+    console.log('✅ Connected to MongoDB!')
+
+    console.log('2️⃣ Importing models...')
+    const Source = await import('./models/Source.js')
+    const Content = await import('./models/Content.js')
+    console.log('✅ Models imported!')
+
+    console.log('3️⃣ Clearing existing data...')
+    await Source.default.deleteMany({})
+    await Content.default.deleteMany({})
+    console.log('✅ Data cleared!')
+
+    console.log('4️⃣ Creating sources...')
+    const sources = [
+      // Reddit Sources
+      {
+        name: 'Reddit - Startups',
+        type: 'reddit',
+        url: 'https://www.reddit.com/r/startups/',
+        description: 'Reddit startup community discussions and ideas',
+        category: 'Startups',
+        priority: 1,
+        config: { subreddit: 'startups', sortBy: 'hot', timeFilter: 'day' },
+        filters: { includeKeywords: ['startup', 'entrepreneur', 'business'], minWordCount: 50 }
+      },
+      {
+        name: 'Reddit - Entrepreneurship',
+        type: 'reddit',
+        url: 'https://www.reddit.com/r/entrepreneur/',
+        description: 'Reddit entrepreneurship community content',
+        category: 'Entrepreneurship',
+        priority: 2,
+        config: { subreddit: 'entrepreneur', sortBy: 'hot', timeFilter: 'day' },
+        filters: { includeKeywords: ['entrepreneur', 'business', 'startup'], minWordCount: 50 }
+      },
+      {
+        name: 'Reddit - Indie Hackers',
+        type: 'reddit',
+        url: 'https://www.reddit.com/r/indiehackers/',
+        description: 'Reddit indie hacker projects and discussions',
+        category: 'Indie Hacking',
+        priority: 3,
+        config: { subreddit: 'indiehackers', sortBy: 'hot', timeFilter: 'day' },
+        filters: { includeKeywords: ['indie', 'hacker', 'project', 'saas'], minWordCount: 50 }
+      },
+      {
+        name: 'Reddit - AI/ML',
+        type: 'reddit',
+        url: 'https://www.reddit.com/r/MachineLearning/',
+        description: 'Reddit machine learning and AI community',
+        category: 'AI/ML',
+        priority: 4,
+        config: { subreddit: 'MachineLearning', sortBy: 'hot', timeFilter: 'day' },
+        filters: { includeKeywords: ['ai', 'machine learning', 'deep learning'], minWordCount: 50 }
+      },
+      {
+        name: 'Reddit - Programming',
+        type: 'reddit',
+        url: 'https://www.reddit.com/r/programming/',
+        description: 'Reddit programming community posts',
+        category: 'Programming',
+        priority: 5,
+        config: { subreddit: 'programming', sortBy: 'hot', timeFilter: 'day' },
+        filters: { includeKeywords: ['javascript', 'python', 'react', 'node'], minWordCount: 50 }
+      },
+      {
+        name: 'Reddit - JavaScript',
+        type: 'reddit',
+        url: 'https://www.reddit.com/r/javascript/',
+        description: 'Reddit JavaScript community posts',
+        category: 'JavaScript',
+        priority: 6,
+        config: { subreddit: 'javascript', sortBy: 'hot', timeFilter: 'day' },
+        filters: { includeKeywords: ['javascript', 'es6', 'react', 'node'], minWordCount: 50 }
+      },
+      {
+        name: 'Reddit - Web Development',
+        type: 'reddit',
+        url: 'https://www.reddit.com/r/webdev/',
+        description: 'Reddit web development community posts',
+        category: 'Web Development',
+        priority: 7,
+        config: { subreddit: 'webdev', sortBy: 'hot', timeFilter: 'day' },
+        filters: { includeKeywords: ['javascript', 'react', 'vue', 'angular'], minWordCount: 50 }
+      },
+      {
+        name: 'Reddit - Python',
+        type: 'reddit',
+        url: 'https://www.reddit.com/r/Python/',
+        description: 'Reddit Python community posts',
+        category: 'Python',
+        priority: 8,
+        config: { subreddit: 'Python', sortBy: 'hot', timeFilter: 'day' },
+        filters: { includeKeywords: ['python', 'django', 'flask', 'data'], minWordCount: 50 }
+      },
+      {
+        name: 'Reddit - Data Science',
+        type: 'reddit',
+        url: 'https://www.reddit.com/r/datascience/',
+        description: 'Reddit data science community',
+        category: 'Data Science',
+        priority: 9,
+        config: { subreddit: 'datascience', sortBy: 'hot', timeFilter: 'day' },
+        filters: { includeKeywords: ['data science', 'machine learning', 'ai', 'analytics'], minWordCount: 50 }
+      },
+      {
+        name: 'Reddit - React',
+        type: 'reddit',
+        url: 'https://www.reddit.com/r/reactjs/',
+        description: 'Reddit React community posts',
+        category: 'Frontend Development',
+        priority: 10,
+        config: { subreddit: 'reactjs', sortBy: 'hot', timeFilter: 'day' },
+        filters: { includeKeywords: ['react', 'javascript', 'frontend', 'web'], minWordCount: 50 }
+      },
+
+      // RSS Feeds
+      {
+        name: 'TechCrunch RSS',
+        type: 'rss',
+        url: 'https://techcrunch.com/feed/',
+        description: 'TechCrunch startup and tech news RSS feed',
+        category: 'Startup News',
+        priority: 1,
+        config: { rssParser: 'default' },
+        filters: { includeKeywords: ['startup', 'funding', 'ai', 'tech'], minWordCount: 150 }
+      },
+      {
+        name: 'VentureBeat RSS',
+        type: 'rss',
+        url: 'https://venturebeat.com/feed/',
+        description: 'VentureBeat startup and tech news RSS feed',
+        category: 'Startup News',
+        priority: 1,
+        config: { rssParser: 'default' },
+        filters: { includeKeywords: ['startup', 'venture', 'ai', 'tech'], minWordCount: 150 }
+      },
+      {
+        name: 'AI News RSS',
+        type: 'rss',
+        url: 'https://www.artificialintelligence-news.com/feed/',
+        description: 'AI News RSS feed for artificial intelligence updates',
+        category: 'AI News',
+        priority: 1,
+        config: { rssParser: 'default' },
+        filters: { includeKeywords: ['ai', 'artificial intelligence', 'machine learning'], minWordCount: 150 }
+      },
+      {
+        name: 'MIT Technology Review RSS',
+        type: 'rss',
+        url: 'https://www.technologyreview.com/feed/',
+        description: 'MIT Technology Review RSS feed',
+        category: 'Technology News',
+        priority: 1,
+        config: { rssParser: 'default' },
+        filters: { includeKeywords: ['ai', 'startup', 'technology', 'innovation'], minWordCount: 150 }
+      },
+      {
+        name: 'Ars Technica RSS',
+        type: 'rss',
+        url: 'https://feeds.arstechnica.com/arstechnica/index',
+        description: 'Ars Technica technology news RSS feed',
+        category: 'Technology News',
+        priority: 1,
+        config: { rssParser: 'default' },
+        filters: { includeKeywords: ['ai', 'startup', 'technology', 'innovation'], minWordCount: 150 }
+      },
+      {
+        name: 'The Verge RSS',
+        type: 'rss',
+        url: 'https://www.theverge.com/rss/index.xml',
+        description: 'The Verge technology news RSS feed',
+        category: 'Technology News',
+        priority: 1,
+        config: { rssParser: 'default' },
+        filters: { includeKeywords: ['ai', 'startup', 'technology', 'innovation'], minWordCount: 150 }
+      },
+      {
+        name: 'Wired RSS',
+        type: 'rss',
+        url: 'https://www.wired.com/feed/rss',
+        description: 'Wired technology news RSS feed',
+        category: 'Technology News',
+        priority: 1,
+        config: { rssParser: 'default' },
+        filters: { includeKeywords: ['ai', 'startup', 'technology', 'innovation'], minWordCount: 150 }
+      },
+      {
+        name: 'Medium AI RSS',
+        type: 'rss',
+        url: 'https://medium.com/feed/tag/artificial-intelligence',
+        description: 'Medium AI articles RSS feed',
+        category: 'AI Articles',
+        priority: 1,
+        config: { rssParser: 'default' },
+        filters: { includeKeywords: ['ai', 'artificial intelligence', 'machine learning'], minWordCount: 200 }
+      },
+
+      // API Sources
+      {
+        name: 'Hacker News',
+        type: 'api',
+        url: 'https://hacker-news.firebaseio.com/v0/topstories.json',
+        description: 'Hacker News top stories - free API',
+        category: 'Technology News',
+        priority: 1,
+        config: { url: 'https://hacker-news.firebaseio.com/v0/topstories.json', headers: {} },
+        filters: { includeKeywords: ['startup', 'ai', 'programming', 'technology'], minWordCount: 100 }
+      },
+      {
+        name: 'Dev.to',
+        type: 'api',
+        url: 'https://dev.to/api/articles',
+        description: 'Dev.to articles - free API',
+        category: 'Development',
+        priority: 1,
+        config: { url: 'https://dev.to/api/articles?tag=startup&top=1', headers: {} },
+        filters: { includeKeywords: ['startup', 'ai', 'javascript', 'react'], minWordCount: 200 }
+      },
+      {
+        name: 'Indie Hackers',
+        type: 'api',
+        url: 'https://indiehackers.com/api',
+        description: 'Indie Hackers projects - free API',
+        category: 'Indie Hacking',
+        priority: 1,
+        config: { url: 'https://indiehackers.com/api/projects', headers: {} },
+        filters: { includeKeywords: ['indie', 'hacker', 'startup', 'saas'], minWordCount: 100 }
+      }
+    ]
+
+    for (const sourceData of sources) {
+      const source = new Source.default(sourceData)
+      await source.save()
+      console.log(`✅ Created source: ${source.name}`)
+    }
+
+    console.log('5️⃣ Creating sample content...')
+    const content = [
+      {
+        title: 'How I Built a $10K MRR SaaS in 6 Months',
+        url: 'https://example.com/saas-success-story',
+        source: 'Reddit - Startups',
+        publishedAt: new Date('2024-01-15T10:00:00Z'),
+        summary: 'A detailed case study of building a successful SaaS product from idea to $10K monthly recurring revenue, including technical challenges, marketing strategies, and lessons learned.',
+        sentiment: 'positive',
+        category: 'Startups',
+        difficulty: 'Intermediate',
+        readingTime: 12,
+        technologies: ['React', 'Node.js', 'Stripe', 'PostgreSQL', 'AWS'],
+        keyInsights: ['Start with a simple MVP', 'Focus on customer feedback early', 'Automate everything possible'],
+        quality: 'high',
+        isProcessed: true
+      },
+      {
+        title: 'Getting Started with Next.js 14 App Router',
+        url: 'https://example.com/nextjs-14-guide',
+        source: 'Reddit - Web Development',
+        publishedAt: new Date('2024-01-14T15:30:00Z'),
+        summary: 'A comprehensive guide to building modern web applications with Next.js 14, covering the new App Router, Server Components, and performance optimizations.',
+        sentiment: 'positive',
+        category: 'Frontend Development',
+        difficulty: 'Intermediate',
+        readingTime: 8,
+        technologies: ['Next.js', 'React', 'JavaScript', 'TypeScript'],
+        keyInsights: ['App Router simplifies routing', 'Server Components improve performance', 'Built-in optimizations reduce bundle size'],
+        quality: 'high',
+        isProcessed: true
+      },
+      {
+        title: 'The Future of AI in Startup Ecosystems',
+        url: 'https://example.com/ai-startup-future',
+        source: 'AI News RSS',
+        publishedAt: new Date('2024-01-13T09:15:00Z'),
+        summary: 'An analysis of how artificial intelligence is transforming startup ecosystems, from automated customer service to predictive analytics and beyond.',
+        sentiment: 'positive',
+        category: 'AI/ML',
+        difficulty: 'Advanced',
+        readingTime: 10,
+        technologies: ['AI', 'Machine Learning', 'Startup Tools', 'Automation'],
+        keyInsights: ['AI reduces operational costs', 'Data-driven decision making', 'Automation enables scaling'],
+        quality: 'high',
+        isProcessed: true
+      },
+      {
+        title: 'Understanding Docker Containers for Developers',
+        url: 'https://example.com/docker-containers',
+        source: 'Reddit - Programming',
+        publishedAt: new Date('2024-01-12T14:20:00Z'),
+        summary: 'Learn the fundamentals of Docker containers, including how they work, why they\'re useful, and how to create and manage them effectively for development and deployment.',
+        sentiment: 'neutral',
+        category: 'DevOps',
+        difficulty: 'Beginner',
+        readingTime: 12,
+        technologies: ['Docker', 'Containers', 'DevOps', 'Linux'],
+        keyInsights: ['Containers provide isolation', 'Docker simplifies deployment', 'Images are immutable'],
+        quality: 'high',
+        isProcessed: true
+      },
+      {
+        title: 'Indie Hacker Guide: From Side Project to Full-Time Income',
+        url: 'https://example.com/indie-hacker-guide',
+        source: 'Reddit - Indie Hackers',
+        publishedAt: new Date('2024-01-11T11:45:00Z'),
+        summary: 'A comprehensive guide for indie hackers looking to turn their side projects into sustainable full-time income, covering monetization, marketing, and growth strategies.',
+        sentiment: 'positive',
+        category: 'Indie Hacking',
+        difficulty: 'Intermediate',
+        readingTime: 18,
+        technologies: ['Web Development', 'Marketing', 'Analytics', 'Payment Processing'],
+        keyInsights: ['Start with solving real problems', 'Build in public for marketing', 'Focus on recurring revenue'],
+        quality: 'high',
+        isProcessed: true
+      },
+      {
+        title: 'Building AI-Powered Features for Your Startup',
+        url: 'https://example.com/ai-startup-features',
+        source: 'Dev.to',
+        publishedAt: new Date('2024-01-10T16:30:00Z'),
+        summary: 'A practical guide to implementing AI features in your startup, including chatbots, recommendation systems, and predictive analytics using open-source tools.',
+        sentiment: 'positive',
+        category: 'AI/ML',
+        difficulty: 'Intermediate',
+        readingTime: 15,
+        technologies: ['Python', 'TensorFlow', 'OpenAI API', 'FastAPI', 'Redis'],
+        keyInsights: ['Use pre-trained models initially', 'Focus on user experience', 'Start with simple AI features'],
+        quality: 'high',
+        isProcessed: true
+      },
+      {
+        title: 'Startup Funding Strategies for 2024',
+        url: 'https://example.com/startup-funding-2024',
+        source: 'TechCrunch RSS',
+        publishedAt: new Date('2024-01-09T11:45:00Z'),
+        summary: 'An overview of current startup funding trends, including venture capital, angel investing, and alternative funding sources for entrepreneurs in 2024.',
+        sentiment: 'neutral',
+        category: 'Startups',
+        difficulty: 'Beginner',
+        readingTime: 8,
+        technologies: ['Business Strategy', 'Finance', 'Networking', 'Pitch Decks'],
+        keyInsights: ['Build relationships with investors early', 'Focus on traction over ideas', 'Consider alternative funding sources'],
+        quality: 'high',
+        isProcessed: true
+      },
+      {
+        title: 'Machine Learning for Product Managers',
+        url: 'https://example.com/ml-product-managers',
+        source: 'Reddit - Data Science',
+        publishedAt: new Date('2024-01-08T16:30:00Z'),
+        summary: 'A guide for product managers to understand machine learning concepts and how to effectively work with data science teams to build AI-powered products.',
+        sentiment: 'positive',
+        category: 'Data Science',
+        difficulty: 'Intermediate',
+        readingTime: 14,
+        technologies: ['Machine Learning', 'Product Management', 'Data Analysis', 'A/B Testing'],
+        keyInsights: ['Understand the basics of ML', 'Focus on business outcomes', 'Collaborate closely with data teams'],
+        quality: 'high',
+        isProcessed: true
+      }
+    ]
+
+    for (const contentData of content) {
+      const contentItem = new Content.default(contentData)
+      await contentItem.save()
+      console.log(`✅ Created content: ${contentItem.title}`)
+    }
+
+    console.log('6️⃣ Final counts...')
+    const sourceCount = await Source.default.countDocuments()
+    const contentCount = await Content.default.countDocuments()
+    console.log(`📊 Sources: ${sourceCount}, Content: ${contentCount}`)
+
+    console.log('🎉 Expanded setup completed successfully!')
+    console.log('🚀 Your DevDigest now has:')
+    console.log(`   📰 ${sourceCount} content sources (Reddit, RSS, APIs)`)
+    console.log(`   📝 ${contentCount} sample articles`)
+    console.log('   🎯 Ready for content aggregation!')
+
+  } catch (error) {
+    console.error('❌ Setup failed:', error.message)
+    console.error('Stack:', error.stack)
+  }
+}
+
+expandedSetup() 

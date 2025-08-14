@@ -1,0 +1,46 @@
+{
+  "name": "devdigest",
+  "version": "1.0.0",
+  "description": "A modern tech feed aggregator with AI-powered insights using Gemini API",
+  "type": "module",
+  "main": "app/page.js",
+  "scripts": {
+    "dev": "next dev",
+    "build": "next build",
+    "start": "next start",
+    "lint": "next lint",
+    "setup": "npm install",
+    "db:setup": "node scripts/setupDatabase.js",
+    "vercel-build": "next build"
+  },
+  "keywords": [
+    "tech-news",
+    "content-aggregator",
+    "ai-analysis",
+    "gemini-api",
+    "reddit-api",
+    "rss-feeds",
+    "portfolio-project"
+  ],
+  "author": "Your Name",
+  "license": "MIT",
+  "dependencies": {
+    "@google/generative-ai": "^0.2.1",
+    "autoprefixer": "^10.4.16",
+    "axios": "^1.6.2",
+    "cheerio": "^1.0.0-rc.12",
+    "mongoose": "^8.0.3",
+    "next": "^14.0.4",
+    "postcss": "^8.4.32",
+    "react": "^18.2.0",
+    "react-dom": "^18.2.0",
+    "tailwindcss": "^3.3.6"
+  },
+  "devDependencies": {
+    "jest": "^29.7.0"
+  },
+  "engines": {
+    "node": ">=18.0.0",
+    "npm": ">=8.0.0"
+  }
+}
