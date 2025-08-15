@@ -2,7 +2,8 @@ import { NextResponse } from 'next/server'
 
 export async function GET(request) {
   try {
-    const { searchParams } = new URL(request.url)
+    // Get search parameters without using request.url
+    const searchParams = request.nextUrl.searchParams
     const code = searchParams.get('code')
     const state = searchParams.get('state')
     const error = searchParams.get('error')
