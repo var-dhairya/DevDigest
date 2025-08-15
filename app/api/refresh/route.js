@@ -76,19 +76,19 @@ export async function POST() {
     
     // Add Reddit sources to parallel processing
     for (const source of redditSources) {
-      const promise = fetchSourceWithTimeout(source, 'reddit', MAX_POSTS_PER_SOURCE, redditToken, sourceStats, true) // Force refresh for Reddit
+      const promise = fetchSourceWithTimeout(source, 'reddit', MAX_POSTS_PER_SOURCE, redditToken, sourceStats, false) // Smart refresh (not force)
       fetchPromises.push(promise)
     }
     
     // Add RSS sources to parallel processing
     for (const source of rssSources) {
-      const promise = fetchSourceWithTimeout(source, 'rss', MAX_POSTS_PER_SOURCE, null, sourceStats, true) // Force refresh for RSS
+      const promise = fetchSourceWithTimeout(source, 'rss', MAX_POSTS_PER_SOURCE, null, sourceStats, false) // Smart refresh (not force)
       fetchPromises.push(promise)
     }
     
     // Add API sources to parallel processing
     for (const source of apiSources) {
-      const promise = fetchSourceWithTimeout(source, 'api', MAX_POSTS_PER_SOURCE, null, sourceStats, true) // Force refresh for APIs
+      const promise = fetchSourceWithTimeout(source, 'api', MAX_POSTS_PER_SOURCE, null, sourceStats, false) // Smart refresh (not force)
       fetchPromises.push(promise)
     }
     
@@ -272,6 +272,37 @@ async function fetchRedditContent(source, maxPosts, token, forceRefresh = false)
     }
 
     console.log(`  📊 Total fetched: ${totalFetched} posts using ${strategyIndex} strategies`)
+    
+    // Minimum guarantee: If we got very few posts, try one more desperate strategy
+    if (totalFetched < Math.max(1, maxPosts * 0.3)) {
+      console.log(`  🚨 Low yield (${totalFetched}), attempting desperate strategy...`)
+      try {
+        // Try all time top posts as a last resort
+        const desperateStrategy = {
+          sortBy: 'top',
+          timeFilter: 'all',
+          limit: Math.min(maxPosts * 2, 200),
+          description: 'desperate all-time top posts'
+        }
+        
+        const desperateResult = await fetchRedditWithStrategy(
+          source, 
+          desperateStrategy, 
+          Math.max(2, maxPosts - totalFetched), 
+          token, 
+          true, // Force refresh for desperate strategy
+          999 // High strategy index
+        )
+        
+        if (desperateResult.fetchedCount > 0) {
+          totalFetched += desperateResult.fetchedCount
+          console.log(`  🎯 Desperate strategy yielded ${desperateResult.fetchedCount} additional posts`)
+        }
+      } catch (desperateError) {
+        console.log(`  ⚠️ Desperate strategy failed: ${desperateError.message}`)
+      }
+    }
+    
     return totalFetched
 
   } catch (error) {
@@ -310,32 +341,66 @@ async function fetchRedditWithStrategy(source, strategy, targetPosts, token, for
     // Fallback to public endpoints
     console.log(`      🌐 Using Reddit public endpoint for ${strategy.sortBy}/${strategy.timeFilter}`)
     
-    // Try multiple approaches for Reddit public endpoints
+    // Try multiple approaches for Reddit public endpoints with progressive strategies
     const approaches = [
-      // Approach 1: Standard Reddit API
+      // Approach 1: Standard Reddit API with random User-Agent rotation
       async () => {
+        const userAgents = [
+          'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
+          'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
+          'Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
+          'DevDigest/1.0.0 (Content Aggregator; +https://devdigest.app)',
+          'Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:109.0) Gecko/20100101 Firefox/121.0'
+        ]
+        const randomUA = userAgents[Math.floor(Math.random() * userAgents.length)]
         const url = `https://www.reddit.com/r/${source.config.subreddit}/${strategy.sortBy}.json?t=${strategy.timeFilter}&limit=${strategy.limit}`
+        
         const response = await fetch(url, {
           headers: {
-            'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36 DevDigest/1.0.0'
-          }
+            'User-Agent': randomUA,
+            'Accept': 'application/json',
+            'Accept-Language': 'en-US,en;q=0.9',
+            'Cache-Control': 'no-cache'
+          },
+          signal: AbortSignal.timeout(15000)
         })
         return response
       },
-      // Approach 2: Alternative User-Agent
+      // Approach 2: Alternative User-Agent with delay
       async () => {
+        await new Promise(resolve => setTimeout(resolve, 2000)) // 2s delay
         const url = `https://www.reddit.com/r/${source.config.subreddit}/${strategy.sortBy}.json?t=${strategy.timeFilter}&limit=${strategy.limit}`
         const response = await fetch(url, {
           headers: {
-            'User-Agent': 'DevDigest/1.0.0 (by /u/your_username)'
-          }
+            'User-Agent': 'DevDigest/1.0.0 (by /u/devdigest_app)',
+            'Accept': 'application/json'
+          },
+          signal: AbortSignal.timeout(20000)
         })
         return response
       },
-      // Approach 3: JSON endpoint with minimal headers
+      // Approach 3: Minimal request with longer timeout
       async () => {
+        await new Promise(resolve => setTimeout(resolve, 3000)) // 3s delay
         const url = `https://www.reddit.com/r/${source.config.subreddit}/${strategy.sortBy}.json?t=${strategy.timeFilter}&limit=${strategy.limit}`
-        const response = await fetch(url)
+        const response = await fetch(url, {
+          headers: {
+            'User-Agent': 'curl/7.68.0'
+          },
+          signal: AbortSignal.timeout(25000)
+        })
+        return response
+      },
+      // Approach 4: Fallback with different endpoint format
+      async () => {
+        await new Promise(resolve => setTimeout(resolve, 5000)) // 5s delay
+        const url = `https://old.reddit.com/r/${source.config.subreddit}/${strategy.sortBy}.json?t=${strategy.timeFilter}&limit=${strategy.limit}`
+        const response = await fetch(url, {
+          headers: {
+            'User-Agent': 'Mozilla/5.0 (compatible; DevDigest/1.0; +https://devdigest.app)'
+          },
+          signal: AbortSignal.timeout(30000)
+        })
         return response
       }
     ]
@@ -402,17 +467,26 @@ async function processRedditPostsWithStrategy(posts, targetPosts, source, forceR
     processedCount++
     const postData = post.data
     
-    // Enhanced duplicate detection with strategy awareness
+    // Smart duplicate detection - allow older posts if we're not getting new content
     const existingContent = await Content.findOne({ 
       url: postData.url
     })
     
-    if (existingContent && !forceRefresh) {
+    if (existingContent) {
+      // If this is a deeper strategy (going for older content) and we haven't found much new content, allow some duplicates if they're old enough
+      const contentAge = (Date.now() - new Date(existingContent.createdAt).getTime()) / (1000 * 60 * 60 * 24) // days
+      const isDeepStrategy = strategyIndex >= 2 || strategy.sortBy === 'top' || strategy.timeFilter === 'week' || strategy.timeFilter === 'month'
+      const needsContent = fetchedCount === 0 && processedCount > 10 // We've processed many but haven't fetched any
+      
+      if (!forceRefresh && !(isDeepStrategy && needsContent && contentAge > 7)) {
       duplicateCount++
-      if (duplicateCount <= 3) { // Only log first few duplicates to avoid spam
-        console.log(`        ⏭️ Skipping duplicate: ${postData.title}`)
-      }
+        if (duplicateCount <= 3) { // Only log first few duplicates to avoid spam
+          console.log(`        ⏭️ Skipping duplicate: ${postData.title}`)
+        }
       continue
+      } else if (isDeepStrategy && needsContent && contentAge > 7) {
+        console.log(`        🔄 Re-adding old content (${Math.floor(contentAge)} days old) due to lack of new posts`)
+      }
     }
     
     // More intelligent filtering based on strategy
@@ -449,7 +523,7 @@ async function processRedditPostsWithStrategy(posts, targetPosts, source, forceR
           })
           if (!partialMatch) {
             filterReason = `missing keywords: ${source.filters.includeKeywords.join(', ')}`
-            shouldInclude = false
+        shouldInclude = false
           }
         } else {
           filterReason = `missing keywords: ${source.filters.includeKeywords.join(', ')}`
@@ -536,8 +610,8 @@ async function fetchRSSContent(source, maxPosts, forceRefresh = false) {
         url: source.url,
         description: 'primary RSS endpoint',
         timeout: 20000,
-        headers: {
-          'User-Agent': 'DevDigest/1.0.0 (Content Aggregator)'
+      headers: {
+        'User-Agent': 'DevDigest/1.0.0 (Content Aggregator)'
         }
       },
       // Secondary strategy: Try with different User-Agent
@@ -574,34 +648,34 @@ async function fetchRSSContent(source, maxPosts, forceRefresh = false) {
 
         console.log(`      📊 HTTP response status: ${response.status} ${response.statusText}`)
 
-        if (!response.ok) {
+    if (!response.ok) {
           console.log(`      ⚠️ Strategy ${strategyIndex + 1} failed: ${response.status} ${response.statusText}`)
           strategyIndex++
           continue
-        }
+    }
 
-        const xmlText = await response.text()
+    const xmlText = await response.text()
         console.log(`      📄 Response size: ${xmlText.length} characters`)
-        
-        // Check if we got valid XML content
-        if (!xmlText || xmlText.length < 100) {
+    
+    // Check if we got valid XML content
+    if (!xmlText || xmlText.length < 100) {
           console.log(`      ⚠️ Strategy ${strategyIndex + 1} returned invalid content (${xmlText?.length || 0} characters)`)
           strategyIndex++
           continue
-        }
-        
-        // Check if it looks like RSS/XML
-        if (!xmlText.includes('<rss') && !xmlText.includes('<feed') && !xmlText.includes('<item')) {
+    }
+    
+    // Check if it looks like RSS/XML
+    if (!xmlText.includes('<rss') && !xmlText.includes('<feed') && !xmlText.includes('<item')) {
           console.log(`      ⚠️ Strategy ${strategyIndex + 1} response doesn't look like RSS/XML`)
           strategyIndex++
           continue
         }
         
         console.log(`      ✅ Valid RSS/XML format detected`)
-        
-        const items = await parseRSSXML(xmlText)
-        
-        if (items.length === 0) {
+    
+    const items = await parseRSSXML(xmlText)
+    
+    if (items.length === 0) {
           console.log(`      ⚠️ Strategy ${strategyIndex + 1} yielded no RSS items`)
           strategyIndex++
           continue
@@ -656,10 +730,10 @@ async function fetchRSSContent(source, maxPosts, forceRefresh = false) {
 
 // Enhanced RSS item processing with strategy awareness
 async function processRSSItemsWithStrategy(items, targetPosts, source, forceRefresh, strategy, strategyIndex) {
-  let fetchedCount = 0
-  let duplicateCount = 0
-  let errorCount = 0
-  let filteredCount = 0
+    let fetchedCount = 0
+    let duplicateCount = 0
+    let errorCount = 0
+    let filteredCount = 0
   let processedCount = 0
   
   // Sort items by date (newest first) for better content discovery
@@ -670,56 +744,56 @@ async function processRSSItemsWithStrategy(items, targetPosts, source, forceRefr
   })
   
   for (const item of sortedItems) {
-    // Safety check to prevent infinite loops
+      // Safety check to prevent infinite loops
     if (fetchedCount >= targetPosts) {
       console.log(`        🎯 Reached target posts limit (${targetPosts}) for this strategy`)
-      break
-    }
+        break
+      }
     
     processedCount++
-    
-    try {
+      
+      try {
       console.log(`        🔍 Processing item: ${item.title?.substring(0, 50)}...`)
-      
+        
       // Enhanced duplicate detection
-      const existingContent = await Content.findOne({ 
-        url: item.link
-      })
-      
-      if (existingContent && !forceRefresh) {
-        duplicateCount++
+        const existingContent = await Content.findOne({ 
+          url: item.link
+        })
+        
+        if (existingContent && !forceRefresh) {
+          duplicateCount++
         if (duplicateCount <= 3) { // Only log first few duplicates
           console.log(`        ⏭️ Skipping duplicate: ${item.title}`)
         }
-        continue
-      }
-      
-      // Use RSS description directly - no full content fetching for speed
-      let description = item.description?.substring(0, 500) || 'No description available'
-      
-      // More intelligent filtering based on strategy
-      let shouldInclude = true
-      let filterReason = ''
-      
-      // Check word count filter (more lenient for RSS)
-      if (source.filters?.minWordCount) {
-        const totalWords = (item.title?.length || 0) + (description?.length || 0)
-        const minRequired = Math.max(15, source.filters.minWordCount / 15) // More lenient for RSS
-        if (totalWords < minRequired) {
-          filterReason = `word count: ${totalWords} < ${minRequired}`
-          shouldInclude = false
+          continue
         }
-      }
-      
+        
+        // Use RSS description directly - no full content fetching for speed
+        let description = item.description?.substring(0, 500) || 'No description available'
+        
+      // More intelligent filtering based on strategy
+        let shouldInclude = true
+      let filterReason = ''
+        
+      // Check word count filter (more lenient for RSS)
+        if (source.filters?.minWordCount) {
+          const totalWords = (item.title?.length || 0) + (description?.length || 0)
+        const minRequired = Math.max(15, source.filters.minWordCount / 15) // More lenient for RSS
+          if (totalWords < minRequired) {
+          filterReason = `word count: ${totalWords} < ${minRequired}`
+            shouldInclude = false
+          }
+        }
+        
       // Check include keywords (more flexible for RSS)
-      if (source.filters?.includeKeywords && source.filters.includeKeywords.length > 0) {
-        const text = (item.title + ' ' + description).toLowerCase()
-        const hasKeyword = source.filters.includeKeywords.some(keyword => 
-          text.includes(keyword.toLowerCase())
-        )
+        if (source.filters?.includeKeywords && source.filters.includeKeywords.length > 0) {
+          const text = (item.title + ' ' + description).toLowerCase()
+          const hasKeyword = source.filters.includeKeywords.some(keyword => 
+            text.includes(keyword.toLowerCase())
+          )
         
         // For RSS, be more flexible with keyword matching
-        if (!hasKeyword) {
+          if (!hasKeyword) {
           const partialMatch = source.filters.includeKeywords.some(keyword => {
             const keywordParts = keyword.toLowerCase().split(' ')
             return keywordParts.some(part => text.includes(part))
@@ -728,68 +802,68 @@ async function processRSSItemsWithStrategy(items, targetPosts, source, forceRefr
             filterReason = `missing keywords: ${source.filters.includeKeywords.join(', ')}`
             shouldInclude = false
           }
+          }
         }
-      }
-      
-      // Check exclude keywords (keep this strict)
-      if (source.filters?.excludeKeywords && source.filters.excludeKeywords.length > 0) {
-        const text = (item.title + ' ' + description).toLowerCase()
-        const hasExcludeKeyword = source.filters.excludeKeywords.some(keyword => 
-          text.includes(keyword.toLowerCase())
-        )
-        if (hasExcludeKeyword) {
+        
+        // Check exclude keywords (keep this strict)
+        if (source.filters?.excludeKeywords && source.filters.excludeKeywords.length > 0) {
+          const text = (item.title + ' ' + description).toLowerCase()
+          const hasExcludeKeyword = source.filters.excludeKeywords.some(keyword => 
+            text.includes(keyword.toLowerCase())
+          )
+          if (hasExcludeKeyword) {
           filterReason = `exclude keywords: ${source.filters.excludeKeywords.join(', ')}`
-          shouldInclude = false
+            shouldInclude = false
+          }
         }
-      }
-      
-      if (!shouldInclude) {
+        
+        if (!shouldInclude) {
         filteredCount++
         if (filteredCount <= 3) { // Only log first few filtered posts
           console.log(`        ⚠️ Filtered out due to ${filterReason}`)
         }
-        continue
-      }
-      
+          continue
+        }
+        
       console.log(`        ✅ Item passed all filters, creating content...`)
-      
+        
       // Create content item with strategy metadata
-      const content = new Content({
-        title: item.title,
-        url: item.link,
-        source: source.name,
-        publishedAt: item.pubDate,
-        summary: description,
-        content: null, // No full content for speed
-        sentiment: 'neutral',
-        category: source.category,
-        difficulty: 'Beginner',
-        readingTime: Math.ceil((item.title.length + (description?.length || 0)) / 200),
-        technologies: extractTechnologies(item.title + ' ' + (description || '')),
-        keyInsights: [],
-        quality: 'medium',
-        isProcessed: false,
-        metadata: {
-          author: item.author || 'Unknown',
-          tags: [],
-          wordCount: (item.title.length + (description?.length || 0)),
-          upvotes: 0,
-          comments: 0,
-          hasFullContent: false,
+        const content = new Content({
+          title: item.title,
+          url: item.link,
+          source: source.name,
+          publishedAt: item.pubDate,
+          summary: description,
+          content: null, // No full content for speed
+          sentiment: 'neutral',
+          category: source.category,
+          difficulty: 'Beginner',
+          readingTime: Math.ceil((item.title.length + (description?.length || 0)) / 200),
+          technologies: extractTechnologies(item.title + ' ' + (description || '')),
+          keyInsights: [],
+          quality: 'medium',
+          isProcessed: false,
+          metadata: {
+            author: item.author || 'Unknown',
+            tags: [],
+            wordCount: (item.title.length + (description?.length || 0)),
+            upvotes: 0,
+            comments: 0,
+            hasFullContent: false,
           descriptionSource: 'rss_feed',
           // Strategy metadata for tracking
           fetchStrategy: strategy.description,
           strategyIndex: strategyIndex,
           originalRank: processedCount
-        }
-      })
+          }
+        })
 
-      await content.save()
-      fetchedCount++
+        await content.save()
+        fetchedCount++
       console.log(`        ✅ Saved: ${item.title} (${strategy.description})`)
-      
-    } catch (saveError) {
-      errorCount++
+        
+      } catch (saveError) {
+        errorCount++
       console.error(`        ❌ Failed to save: ${item.title} - ${saveError.message}`)
     }
   }
@@ -995,74 +1069,74 @@ async function processHNStoriesWithStrategy(stories, targetPosts, source, forceR
   let processedCount = 0
   
   for (const storyId of stories) {
-    // Safety check to prevent infinite loops
+          // Safety check to prevent infinite loops
     if (fetchedCount >= targetPosts) {
       console.log(`        🎯 Reached target posts limit (${targetPosts}) for this strategy`)
-      break
-    }
+            break
+          }
     
     processedCount++
-    
-    try {
-      const storyResponse = await fetch(`https://hacker-news.firebaseio.com/v0/item/${storyId}.json`, {
+          
+          try {
+            const storyResponse = await fetch(`https://hacker-news.firebaseio.com/v0/item/${storyId}.json`, {
         signal: AbortSignal.timeout(10000)
-      })
-      
-      if (!storyResponse.ok) {
+            })
+            
+            if (!storyResponse.ok) {
         console.log(`        ⚠️ Failed to fetch HN story ${storyId}: ${storyResponse.status}`)
-        continue
-      }
-      
-      const story = await storyResponse.json()
-      
-      if (story && story.url && story.title) {
+              continue
+            }
+            
+            const story = await storyResponse.json()
+            
+            if (story && story.url && story.title) {
         // Enhanced duplicate detection
-        const existingContent = await Content.findOne({ 
-          url: story.url
-        })
-        
-        if (existingContent && !forceRefresh) {
+              const existingContent = await Content.findOne({ 
+                url: story.url
+              })
+              
+              if (existingContent && !forceRefresh) {
           duplicateCount++
           if (duplicateCount <= 3) { // Only log first few duplicates
             console.log(`        ⏭️ Skipping duplicate HN story: ${story.title}`)
           }
-          continue
-        }
-        
-        const content = new Content({
-          title: story.title,
-          url: story.url,
-          source: source.name,
-          publishedAt: new Date(story.time * 1000),
+                continue
+              }
+              
+              const content = new Content({
+                title: story.title,
+                url: story.url,
+                source: source.name,
+                publishedAt: new Date(story.time * 1000),
           summary: `Hacker News ${strategy.description} with ${story.score || 0} points`,
-          content: null,
-          sentiment: 'neutral',
-          category: source.category,
-          difficulty: 'Beginner',
-          readingTime: Math.ceil(story.title.length / 200),
-          technologies: extractTechnologies(story.title),
-          keyInsights: [],
-          quality: 'medium',
-          isProcessed: false,
-          metadata: {
-            author: story.by || 'Unknown',
-            tags: [],
-            wordCount: story.title.length,
-            upvotes: story.score || 0,
-            comments: story.descendants || 0,
+                content: null,
+                sentiment: 'neutral',
+                category: source.category,
+                difficulty: 'Beginner',
+                readingTime: Math.ceil(story.title.length / 200),
+                technologies: extractTechnologies(story.title),
+                keyInsights: [],
+                quality: 'medium',
+                isProcessed: false,
+                metadata: {
+                  author: story.by || 'Unknown',
+                  tags: [],
+                  wordCount: story.title.length,
+                  upvotes: story.score || 0,
+                  comments: story.descendants || 0,
             hnId: storyId,
             // Strategy metadata for tracking
             fetchStrategy: strategy.description,
             strategyIndex: strategyIndex,
             originalRank: processedCount
-          }
-        })
+                }
+              })
 
-        await content.save()
-        fetchedCount++
+              await content.save()
+              fetchedCount++
         console.log(`        ✅ Saved HN story: ${story.title} (${strategy.description})`)
-      }
-    } catch (error) {
+            }
+          } catch (error) {
       errorCount++
       if (errorCount <= 3) { // Only log first few errors
         console.log(`        ⚠️ Error fetching HN story ${storyId}: ${error.message}`)
@@ -1090,113 +1164,113 @@ async function processAPIItemsWithStrategy(items, targetPosts, source, forceRefr
   })
   
   for (const item of sortedItems) {
-    // Safety check to prevent infinite loops
+        // Safety check to prevent infinite loops
     if (fetchedCount >= targetPosts) {
       console.log(`        🎯 Reached target posts limit (${targetPosts}) for this strategy`)
-      break
-    }
+          break
+        }
     
     processedCount++
-    
-    if (item.title && item.url) {
+        
+        if (item.title && item.url) {
       // Enhanced duplicate detection
-      const existingContent = await Content.findOne({ 
-        url: item.url
-      })
-      
-      if (existingContent && !forceRefresh) {
+          const existingContent = await Content.findOne({ 
+            url: item.url
+          })
+          
+          if (existingContent && !forceRefresh) {
         duplicateCount++
         if (duplicateCount <= 3) { // Only log first few duplicates
           console.log(`        ⏭️ Skipping duplicate: ${item.title}`)
         }
-        continue
-      }
-      
+            continue
+          }
+          
       // More intelligent filtering based on strategy
-      let shouldInclude = true
+          let shouldInclude = true
       let filterReason = ''
-      
+          
       // Check word count filter (more lenient for API content)
-      if (source.filters?.minWordCount) {
-        const totalWords = (item.title?.length || 0) + (item.description?.length || 0)
+          if (source.filters?.minWordCount) {
+            const totalWords = (item.title?.length || 0) + (item.description?.length || 0)
         const minRequired = Math.max(15, source.filters.minWordCount / 15) // More lenient for API
         if (totalWords < minRequired) {
           filterReason = `word count: ${totalWords} < ${minRequired}`
-          shouldInclude = false
-        }
-      }
-      
+              shouldInclude = false
+            }
+          }
+          
       // Check include keywords (more flexible for API content)
-      if (source.filters?.includeKeywords && source.filters.includeKeywords.length > 0) {
-        const text = (item.title + ' ' + (item.description || '')).toLowerCase()
-        const hasKeyword = source.filters.includeKeywords.some(keyword => 
-          text.includes(keyword.toLowerCase())
-        )
+          if (source.filters?.includeKeywords && source.filters.includeKeywords.length > 0) {
+            const text = (item.title + ' ' + (item.description || '')).toLowerCase()
+            const hasKeyword = source.filters.includeKeywords.some(keyword => 
+              text.includes(keyword.toLowerCase())
+            )
         
         // For API content, be more flexible with keyword matching
-        if (!hasKeyword) {
+            if (!hasKeyword) {
           const partialMatch = source.filters.includeKeywords.some(keyword => {
             const keywordParts = keyword.toLowerCase().split(' ')
             return keywordParts.some(part => text.includes(part))
           })
           if (!partialMatch) {
             filterReason = `missing keywords: ${source.filters.includeKeywords.join(', ')}`
-            shouldInclude = false
+              shouldInclude = false
           }
-        }
-      }
-      
-      // Check exclude keywords (keep this strict)
-      if (source.filters?.excludeKeywords && source.filters.excludeKeywords.length > 0) {
-        const text = (item.title + ' ' + (item.description || '')).toLowerCase()
-        const hasExcludeKeyword = source.filters.excludeKeywords.some(keyword => 
-          text.includes(keyword.toLowerCase())
-        )
-        if (hasExcludeKeyword) {
+            }
+          }
+          
+          // Check exclude keywords (keep this strict)
+          if (source.filters?.excludeKeywords && source.filters.excludeKeywords.length > 0) {
+            const text = (item.title + ' ' + (item.description || '')).toLowerCase()
+            const hasExcludeKeyword = source.filters.excludeKeywords.some(keyword => 
+              text.includes(keyword.toLowerCase())
+            )
+            if (hasExcludeKeyword) {
           filterReason = `exclude keywords: ${source.filters.excludeKeywords.join(', ')}`
-          shouldInclude = false
-        }
-      }
-      
-      if (!shouldInclude) {
+              shouldInclude = false
+            }
+          }
+          
+          if (!shouldInclude) {
         filteredCount++
         if (filteredCount <= 3) { // Only log first few filtered posts
           console.log(`        ⚠️ Filtered out due to ${filterReason}`)
         }
-        continue
-      }
-      
-      const content = new Content({
-        title: item.title,
-        url: item.url,
-        source: source.name,
-        publishedAt: item.publishedAt ? new Date(item.publishedAt) : new Date(),
-        summary: item.description || item.summary || 'No description available',
-        content: item.content || null,
-        sentiment: 'neutral',
-        category: source.category,
-        difficulty: 'Beginner',
-        readingTime: Math.ceil((item.title.length + (item.description?.length || 0)) / 200),
-        technologies: extractTechnologies(item.title + ' ' + (item.description || '')),
-        keyInsights: [],
-        quality: 'medium',
-        isProcessed: false,
-        metadata: {
-          author: item.author || 'Unknown',
-          tags: item.tags || [],
+            continue
+          }
+          
+          const content = new Content({
+            title: item.title,
+            url: item.url,
+            source: source.name,
+            publishedAt: item.publishedAt ? new Date(item.publishedAt) : new Date(),
+            summary: item.description || item.summary || 'No description available',
+            content: item.content || null,
+            sentiment: 'neutral',
+            category: source.category,
+            difficulty: 'Beginner',
+            readingTime: Math.ceil((item.title.length + (item.description?.length || 0)) / 200),
+            technologies: extractTechnologies(item.title + ' ' + (item.description || '')),
+            keyInsights: [],
+            quality: 'medium',
+            isProcessed: false,
+            metadata: {
+              author: item.author || 'Unknown',
+              tags: item.tags || [],
           wordCount: (item.title.length + (item.description?.length || 0)),
           // Strategy metadata for tracking
           fetchStrategy: strategy.description,
           strategyIndex: strategyIndex,
           originalRank: processedCount
-        }
-      })
+            }
+          })
 
-      try {
-        await content.save()
-        fetchedCount++
+          try {
+            await content.save()
+            fetchedCount++
         console.log(`        ✅ Saved: ${item.title} (${strategy.description})`)
-      } catch (saveError) {
+          } catch (saveError) {
         console.error(`        ❌ Failed to save: ${item.title} - ${saveError.message}`)
       }
     }
