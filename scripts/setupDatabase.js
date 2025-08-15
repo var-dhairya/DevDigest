@@ -283,6 +283,54 @@ const defaultSources = [
     }
   },
   {
+    name: 'Medium AI RSS',
+    type: 'rss',
+    url: 'https://medium.com/feed/tag/artificial-intelligence',
+    description: 'Medium AI articles RSS feed',
+    category: 'AI Articles',
+    priority: 5,
+    config: {
+      rssParser: 'default'
+    },
+    filters: {
+      includeKeywords: ['ai', 'artificial intelligence', 'machine learning', 'deep learning', 'neural network'],
+      excludeKeywords: ['spam', 'advertisement'],
+      minWordCount: 200
+    }
+  },
+  {
+    name: 'Medium Startups RSS',
+    type: 'rss',
+    url: 'https://medium.com/feed/tag/startup',
+    description: 'Medium startup articles RSS feed',
+    category: 'Startup Articles',
+    priority: 5,
+    config: {
+      rssParser: 'default'
+    },
+    filters: {
+      includeKeywords: ['startup', 'entrepreneur', 'business', 'funding', 'growth', 'product', 'saas'],
+      excludeKeywords: ['spam', 'advertisement'],
+      minWordCount: 200
+    }
+  },
+  {
+    name: 'Medium Programming RSS',
+    type: 'rss',
+    url: 'https://medium.com/feed/tag/programming',
+    description: 'Medium programming articles RSS feed',
+    category: 'Programming Articles',
+    priority: 5,
+    config: {
+      rssParser: 'default'
+    },
+    filters: {
+      includeKeywords: ['javascript', 'python', 'react', 'node', 'web', 'development', 'coding'],
+      excludeKeywords: ['spam', 'advertisement'],
+      minWordCount: 200
+    }
+  },
+  {
     name: 'VentureBeat RSS',
     type: 'rss',
     url: 'https://venturebeat.com/feed/',
