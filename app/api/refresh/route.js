@@ -76,19 +76,19 @@ export async function POST() {
     
     // Add Reddit sources to parallel processing
     for (const source of redditSources) {
-      const promise = fetchSourceWithTimeout(source, 'reddit', MAX_POSTS_PER_SOURCE, redditToken, sourceStats)
+      const promise = fetchSourceWithTimeout(source, 'reddit', MAX_POSTS_PER_SOURCE, redditToken, sourceStats, true) // Force refresh for Reddit
       fetchPromises.push(promise)
     }
     
     // Add RSS sources to parallel processing
     for (const source of rssSources) {
-      const promise = fetchSourceWithTimeout(source, 'rss', MAX_POSTS_PER_SOURCE, null, sourceStats)
+      const promise = fetchSourceWithTimeout(source, 'rss', MAX_POSTS_PER_SOURCE, null, sourceStats, true) // Force refresh for RSS
       fetchPromises.push(promise)
     }
     
     // Add API sources to parallel processing
     for (const source of apiSources) {
-      const promise = fetchSourceWithTimeout(source, 'api', MAX_POSTS_PER_SOURCE, null, sourceStats)
+      const promise = fetchSourceWithTimeout(source, 'api', MAX_POSTS_PER_SOURCE, null, sourceStats, true) // Force refresh for APIs
       fetchPromises.push(promise)
     }
     
@@ -163,7 +163,7 @@ export async function POST() {
 }
 
 // Helper function to fetch a single source with timeout and early termination
-async function fetchSourceWithTimeout(source, sourceType, maxPosts, redditToken, sourceStats) {
+async function fetchSourceWithTimeout(source, sourceType, maxPosts, redditToken, sourceStats, forceRefresh = false) {
   const startTime = Date.now()
   
   try {
@@ -172,11 +172,11 @@ async function fetchSourceWithTimeout(source, sourceType, maxPosts, redditToken,
     let fetchedCount = 0
     
     if (sourceType === 'reddit') {
-      fetchedCount = await fetchRedditContent(source, maxPosts, redditToken)
+      fetchedCount = await fetchRedditContent(source, maxPosts, redditToken, forceRefresh)
     } else if (sourceType === 'rss') {
-      fetchedCount = await fetchRSSContent(source, maxPosts)
+      fetchedCount = await fetchRSSContent(source, maxPosts, forceRefresh)
     } else if (sourceType === 'api') {
-      fetchedCount = await fetchAPIContent(source, maxPosts)
+      fetchedCount = await fetchAPIContent(source, maxPosts, forceRefresh)
     }
     
     const processingTime = Date.now() - startTime
@@ -191,7 +191,7 @@ async function fetchSourceWithTimeout(source, sourceType, maxPosts, redditToken,
   }
 }
 
-async function fetchRedditContent(source, maxPosts, token) {
+async function fetchRedditContent(source, maxPosts, token, forceRefresh = false) {
   console.log(`  📱 Fetching Reddit content from r/${source.config.subreddit}`)
   
   try {
@@ -213,7 +213,7 @@ async function fetchRedditContent(source, maxPosts, token) {
         const posts = data.data?.children || []
         
         console.log(`    📊 Found ${posts.length} Reddit posts via OAuth`)
-        return await processRedditPosts(posts, maxPosts, source)
+        return await processRedditPosts(posts, maxPosts, source, forceRefresh)
       } else {
         console.log(`    ⚠️ Reddit OAuth failed with status ${response.status}, falling back to public endpoint`)
       }
@@ -278,7 +278,7 @@ async function fetchRedditContent(source, maxPosts, token) {
     const posts = data.data?.children || []
     
     console.log(`    📊 Found ${posts.length} Reddit posts via public endpoint`)
-    return await processRedditPosts(posts, maxPosts, source)
+    return await processRedditPosts(posts, maxPosts, source, forceRefresh)
 
   } catch (error) {
     console.error(`  ❌ Reddit fetch failed: ${error.message}`)
@@ -287,8 +287,9 @@ async function fetchRedditContent(source, maxPosts, token) {
 }
 
 // Helper function to process Reddit posts
-async function processRedditPosts(posts, maxPosts, source) {
+async function processRedditPosts(posts, maxPosts, source, forceRefresh = false) {
   let fetchedCount = 0
+  let duplicateCount = 0
   
   for (const post of posts.slice(0, maxPosts)) {
     // Safety check to prevent infinite loops
@@ -299,10 +300,16 @@ async function processRedditPosts(posts, maxPosts, source) {
     
     const postData = post.data
     
-    // Check if content already exists to avoid duplicate URL errors
-    const existingContent = await Content.findOne({ url: postData.url })
-    if (existingContent) {
-      console.log(`    ⏭️ Skipping duplicate: ${postData.title}`)
+    // Smarter duplicate detection - check if we recently fetched this exact post
+    const existingContent = await Content.findOne({ 
+      url: postData.url,
+      // Only consider it duplicate if fetched in last 24 hours
+      createdAt: { $gte: new Date(Date.now() - 24 * 60 * 60 * 1000) }
+    })
+    
+    if (existingContent && !forceRefresh) {
+      duplicateCount++
+      console.log(`    ⏭️ Skipping recently fetched: ${postData.title}`)
       continue
     }
     
@@ -344,11 +351,11 @@ async function processRedditPosts(posts, maxPosts, source) {
     }
   }
 
-  console.log(`  ✅ Fetched ${fetchedCount} posts from Reddit`)
+  console.log(`  ✅ Fetched ${fetchedCount} posts from Reddit (${duplicateCount} recent duplicates skipped)`)
   return fetchedCount
 }
 
-async function fetchRSSContent(source, maxPosts) {
+async function fetchRSSContent(source, maxPosts, forceRefresh = false) {
   console.log(`  📡 Fetching RSS content from ${source.url}`)
   
   try {
@@ -392,11 +399,16 @@ async function fetchRSSContent(source, maxPosts) {
       }
       
       try {
-        // Check if content already exists to avoid duplicate URL errors
-        const existingContent = await Content.findOne({ url: item.link })
-        if (existingContent) {
+        // Smarter duplicate detection - check if we recently fetched this exact post
+        const existingContent = await Content.findOne({ 
+          url: item.link,
+          // Only consider it duplicate if fetched in last 24 hours
+          createdAt: { $gte: new Date(Date.now() - 24 * 60 * 60 * 1000) }
+        })
+        
+        if (existingContent && !forceRefresh) {
           duplicateCount++
-          console.log(`    ⏭️ Skipping duplicate: ${item.title}`)
+          console.log(`    ⏭️ Skipping recently fetched: ${item.title}`)
           continue
         }
         
@@ -449,7 +461,7 @@ async function fetchRSSContent(source, maxPosts) {
   }
 }
 
-async function fetchAPIContent(source, maxPosts) {
+async function fetchAPIContent(source, maxPosts, forceRefresh = false) {
   console.log(`  🔌 Fetching API content from ${source.url}`)
   
   try {
@@ -491,10 +503,15 @@ async function fetchAPIContent(source, maxPosts) {
             const story = await storyResponse.json()
             
             if (story && story.url && story.title) {
-              // Check if content already exists
-              const existingContent = await Content.findOne({ url: story.url })
-              if (existingContent) {
-                console.log(`    ⏭️ Skipping duplicate HN story: ${story.title}`)
+              // Smarter duplicate detection - check if we recently fetched this exact post
+              const existingContent = await Content.findOne({ 
+                url: story.url,
+                // Only consider it duplicate if fetched in last 24 hours
+                createdAt: { $gte: new Date(Date.now() - 24 * 60 * 60 * 1000) }
+              })
+              
+              if (existingContent && !forceRefresh) {
+                console.log(`    ⏭️ Skipping recently fetched HN story: ${story.title}`)
                 continue
               }
               
@@ -566,10 +583,15 @@ async function fetchAPIContent(source, maxPosts) {
         }
         
         if (item.title && item.url) {
-          // Check if content already exists
-          const existingContent = await Content.findOne({ url: item.url })
-          if (existingContent) {
-            console.log(`    ⏭️ Skipping duplicate: ${item.title}`)
+          // Smarter duplicate detection - check if we recently fetched this exact post
+          const existingContent = await Content.findOne({ 
+            url: item.url,
+            // Only consider it duplicate if fetched in last 24 hours
+            createdAt: { $gte: new Date(Date.now() - 24 * 60 * 60 * 1000) }
+          })
+          
+          if (existingContent && !forceRefresh) {
+            console.log(`    ⏭️ Skipping recently fetched: ${item.title}`)
             continue
           }
           
