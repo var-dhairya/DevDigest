@@ -86,6 +86,15 @@ const sourceSchema = new mongoose.Schema({
       window: Number
     }
   },
+  oauth: {
+    accessToken: String,
+    refreshToken: String,
+    expiresAt: Date,
+    tokenType: {
+      type: String,
+      default: 'bearer'
+    }
+  },
   stats: {
     totalFetched: {
       type: Number,

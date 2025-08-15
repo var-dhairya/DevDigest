@@ -125,21 +125,48 @@ async function fetchRedditContent(source) {
   console.log(`  📱 Fetching Reddit content from r/${source.config.subreddit}`)
   
   try {
-    const url = `https://www.reddit.com/r/${source.config.subreddit}/${source.config.sortBy}.json?t=${source.config.timeFilter}&limit=10`
+    // Check if we have OAuth tokens
+    if (!source.oauth?.accessToken) {
+      console.log(`  ⚠️ No OAuth access token found for Reddit source ${source.name}`)
+      console.log(`  💡 You need to complete the OAuth flow first`)
+      return 0
+    }
+    
+    // Check if token is expired and try to refresh it
+    if (source.oauth.expiresAt && new Date() > source.oauth.expiresAt) {
+      console.log(`  ⚠️ OAuth token expired for Reddit source ${source.name}`)
+      const refreshed = await refreshRedditToken(source)
+      if (!refreshed) {
+        console.log(`  ❌ Failed to refresh token for ${source.name}`)
+        return 0
+      }
+      // Get the updated source with new token
+      const updatedSource = await Source.findById(source._id)
+      source = updatedSource
+    }
+    
+    // Use OAuth endpoint instead of public JSON endpoint
+    const url = `https://oauth.reddit.com/r/${source.config.subreddit}/${source.config.sortBy}?t=${source.config.timeFilter}&limit=10`
     
     const response = await fetch(url, {
       headers: {
-        'User-Agent': 'DevDigest/1.0.0 (Content Aggregator) - https://dev-digest-ag.vercel.app'
+        'Authorization': `Bearer ${source.oauth.accessToken}`,
+        'User-Agent': 'DevDigest/1.0.0 (by /u/your_username) - https://dev-digest-ag.vercel.app'
       }
     })
 
     if (!response.ok) {
-      if (response.status === 403) {
-        console.log(`  ⚠️ Reddit API blocked request (403) - this is common from cloud platforms`)
-        console.log(`  💡 Consider using Reddit's official API with authentication`)
+      if (response.status === 401) {
+        console.log(`  ⚠️ OAuth token invalid for Reddit source ${source.name}`)
+        console.log(`  💡 You need to re-authenticate`)
         return 0
       }
-      throw new Error(`Reddit API returned ${response.status}`)
+      if (response.status === 403) {
+        console.log(`  ⚠️ Reddit OAuth API returned 403 - this shouldn't happen with proper OAuth`)
+        console.log(`  💡 Check your app permissions and rate limits`)
+        return 0
+      }
+      throw new Error(`Reddit OAuth API returned ${response.status}`)
     }
 
     const data = await response.json()
@@ -201,12 +228,58 @@ async function fetchRedditContent(source) {
       }
     }
 
-    console.log(`  ✅ Fetched ${fetchedCount} posts from Reddit`)
+    console.log(`  ✅ Fetched ${fetchedCount} posts from Reddit OAuth API`)
     return fetchedCount
 
   } catch (error) {
-    console.error(`  ❌ Reddit fetch failed: ${error.message}`)
+    console.error(`  ❌ Reddit OAuth API fetch failed: ${error.message}`)
     return 0
+  }
+}
+
+async function refreshRedditToken(source) {
+  try {
+    console.log(`  🔄 Refreshing expired Reddit OAuth token for ${source.name}`)
+    
+    if (!source.oauth?.refreshToken) {
+      console.log(`  ❌ No refresh token available for ${source.name}`)
+      return false
+    }
+    
+    const response = await fetch('https://www.reddit.com/api/v1/access_token', {
+      method: 'POST',
+      headers: {
+        'Authorization': `Basic ${Buffer.from(
+          `${process.env.REDDIT_CLIENT_ID}:${process.env.REDDIT_CLIENT_SECRET}`
+        ).toString('base64')}`,
+        'Content-Type': 'application/x-www-form-urlencoded',
+        'User-Agent': 'DevDigest/1.0.0 (by /u/your_username) - https://dev-digest-ag.vercel.app'
+      },
+      body: new URLSearchParams({
+        grant_type: 'refresh_token',
+        refresh_token: source.oauth.refreshToken
+      })
+    })
+    
+    if (!response.ok) {
+      console.log(`  ❌ Token refresh failed: ${response.status}`)
+      return false
+    }
+    
+    const tokenData = await response.json()
+    
+    // Update the source with new tokens
+    await Source.findByIdAndUpdate(source._id, {
+      'oauth.accessToken': tokenData.access_token,
+      'oauth.expiresAt': new Date(Date.now() + (tokenData.expires_in * 1000))
+    })
+    
+    console.log(`  ✅ Token refreshed successfully for ${source.name}`)
+    return true
+    
+  } catch (error) {
+    console.error(`  ❌ Token refresh error: ${error.message}`)
+    return false
   }
 }
 
