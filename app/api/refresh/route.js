@@ -64,135 +64,69 @@ export async function POST() {
       api: { processed: 0, success: 0, failed: 0, totalFetched: 0 }
     }
     
-    // First pass: Try to get at least 1-2 posts from each source
-    console.log('\n🔄 First pass: Getting initial posts from each source...')
-    for (const source of sources) {
-      if (totalFetched >= MAX_TOTAL_POSTS) break
+    // Group sources by type for parallel processing
+    const redditSources = sources.filter(s => s.type === 'reddit')
+    const rssSources = sources.filter(s => s.type === 'rss')
+    const apiSources = sources.filter(s => s.type === 'api')
+    
+    console.log(`📊 Source distribution: ${redditSources.length} Reddit, ${rssSources.length} RSS, ${apiSources.length} API`)
+    
+    // Parallel fetching with early termination
+    const fetchPromises = []
+    
+    // Add Reddit sources to parallel processing
+    for (const source of redditSources) {
+      const promise = fetchSourceWithTimeout(source, 'reddit', MAX_POSTS_PER_SOURCE, redditToken, sourceStats)
+      fetchPromises.push(promise)
+    }
+    
+    // Add RSS sources to parallel processing
+    for (const source of rssSources) {
+      const promise = fetchSourceWithTimeout(source, 'rss', MAX_POSTS_PER_SOURCE, null, sourceStats)
+      fetchPromises.push(promise)
+    }
+    
+    // Add API sources to parallel processing
+    for (const source of apiSources) {
+      const promise = fetchSourceWithTimeout(source, 'api', MAX_POSTS_PER_SOURCE, null, sourceStats)
+      fetchPromises.push(promise)
+    }
+    
+    console.log(`🚀 Starting parallel fetch for ${fetchPromises.length} sources...`)
+    
+    // Execute all promises in parallel with early termination monitoring
+    const results = await Promise.allSettled(fetchPromises)
+    
+    // Process results and update stats
+    for (let i = 0; i < results.length; i++) {
+      const result = results[i]
+      const source = sources[i]
       
-      try {
-        console.log(`🔍 Processing source: ${source.name} (${source.type})`)
-        
-        let fetchedCount = 0
-        const startTime = Date.now()
-        
-        // First pass: Get 1-2 posts from each source
-        const initialPosts = Math.min(2, MAX_POSTS_PER_SOURCE)
-        const remainingPosts = Math.min(initialPosts, MAX_TOTAL_POSTS - totalFetched)
-        
-        console.log(`  📊 First pass: Fetching up to ${remainingPosts} posts`)
-        
-        if (source.type === 'reddit') {
-          sourceStats.reddit.processed++
-          fetchedCount = await fetchRedditContent(source, remainingPosts, redditToken)
-          if (fetchedCount > 0) {
-            sourceStats.reddit.success++
-            sourceStats.reddit.totalFetched += fetchedCount
-          } else {
-            sourceStats.reddit.failed++
-          }
-        } else if (source.type === 'rss') {
-          sourceStats.rss.processed++
-          fetchedCount = await fetchRSSContent(source, remainingPosts)
-          if (fetchedCount > 0) {
-            sourceStats.rss.success++
-            sourceStats.rss.totalFetched += fetchedCount
-          } else {
-            sourceStats.rss.failed++
-          }
-        } else if (source.type === 'api') {
-          sourceStats.api.processed++
-          fetchedCount = await fetchAPIContent(source, remainingPosts)
-          if (fetchedCount > 0) {
-            sourceStats.api.success++
-            sourceStats.api.totalFetched += fetchedCount
-          } else {
-            sourceStats.api.failed++
-          }
-        }
-        
-        const processingTime = Date.now() - startTime
+      if (result.status === 'fulfilled') {
+        const { fetchedCount, sourceType } = result.value
         totalFetched += fetchedCount
         newPostsCount += fetchedCount
         
-        console.log(`  ✅ Source ${source.name} completed: ${fetchedCount} new items (${processingTime}ms)`)
-        console.log(`  🎯 Total posts so far: ${totalFetched}/${MAX_TOTAL_POSTS}`)
-        
-        // Reduced delay for faster processing
-        await new Promise(resolve => setTimeout(resolve, 200))
-        
-      } catch (error) {
-        console.error(`❌ Error processing source ${source.name}:`, error.message)
-        
-        // Update stats for failed sources
-        if (source.type === 'reddit') {
-          sourceStats.reddit.processed++
-          sourceStats.reddit.failed++
-        } else if (source.type === 'rss') {
-          sourceStats.rss.processed++
-          sourceStats.rss.failed++
-        } else if (source.type === 'api') {
-          sourceStats.api.processed++
-          sourceStats.api.failed++
+        if (fetchedCount > 0) {
+          sourceStats[sourceType].success++
+          sourceStats[sourceType].totalFetched += fetchedCount
+        } else {
+          sourceStats[sourceType].failed++
         }
+        
+        console.log(`✅ ${source.name}: ${fetchedCount} posts fetched (Total: ${totalFetched}/${MAX_TOTAL_POSTS})`)
+        
+        // Early termination check
+        if (totalFetched >= MAX_TOTAL_POSTS) {
+          console.log(`🎯 Reached maximum posts limit (${MAX_TOTAL_POSTS}). Stopping processing.`)
+          break
+        }
+      } else {
+        console.error(`❌ ${source.name} failed:`, result.reason)
+        sourceStats[source.type].failed++
       }
-    }
-    
-    // Second pass: Fill remaining slots with additional posts from sources that have more content
-    if (totalFetched < MAX_TOTAL_POSTS) {
-      console.log(`\n🔄 Second pass: Filling remaining ${MAX_TOTAL_POSTS - totalFetched} slots...`)
       
-      for (const source of sources) {
-        if (totalFetched >= MAX_TOTAL_POSTS) break
-        
-        try {
-          console.log(`🔍 Second pass for: ${source.name} (${source.type})`)
-          
-          let fetchedCount = 0
-          const startTime = Date.now()
-          
-          // Second pass: Get additional posts up to the per-source limit
-          const remainingTotal = MAX_TOTAL_POSTS - totalFetched
-          const alreadyFetched = sourceStats[source.type].totalFetched
-          const maxAdditional = Math.min(MAX_POSTS_PER_SOURCE - alreadyFetched, remainingTotal)
-          
-          if (maxAdditional <= 0) {
-            console.log(`  ⏭️ Source ${source.name} already at limit (${alreadyFetched}/${MAX_POSTS_PER_SOURCE})`)
-            continue
-          }
-          
-          console.log(`  📊 Second pass: Fetching up to ${maxAdditional} additional posts`)
-          
-          if (source.type === 'reddit') {
-            fetchedCount = await fetchRedditContent(source, maxAdditional, redditToken)
-            if (fetchedCount > 0) {
-              sourceStats.reddit.totalFetched += fetchedCount
-            }
-          } else if (source.type === 'rss') {
-            fetchedCount = await fetchRSSContent(source, maxAdditional)
-            if (fetchedCount > 0) {
-              sourceStats.rss.totalFetched += fetchedCount
-            }
-          } else if (source.type === 'api') {
-            fetchedCount = await fetchAPIContent(source, maxAdditional)
-            if (fetchedCount > 0) {
-              sourceStats.api.totalFetched += fetchedCount
-            }
-          }
-          
-          const processingTime = Date.now() - startTime
-          totalFetched += fetchedCount
-          newPostsCount += fetchedCount
-          
-          console.log(`  ✅ Source ${source.name} second pass: ${fetchedCount} additional items (${processingTime}ms)`)
-          console.log(`  🎯 Total posts so far: ${totalFetched}/${MAX_TOTAL_POSTS}`)
-          
-          // Reduced delay for faster processing
-          await new Promise(resolve => setTimeout(resolve, 200))
-          
-        } catch (error) {
-          console.error(`❌ Error in second pass for source ${source.name}:`, error.message)
-        }
-      }
+      sourceStats[source.type].processed++
     }
     
     // Print detailed summary
@@ -225,6 +159,35 @@ export async function POST() {
       success: false,
       error: error.message
     }, { status: 500 })
+  }
+}
+
+// Helper function to fetch a single source with timeout and early termination
+async function fetchSourceWithTimeout(source, sourceType, maxPosts, redditToken, sourceStats) {
+  const startTime = Date.now()
+  
+  try {
+    console.log(`🔍 Processing ${source.name} (${sourceType})`)
+    
+    let fetchedCount = 0
+    
+    if (sourceType === 'reddit') {
+      fetchedCount = await fetchRedditContent(source, maxPosts, redditToken)
+    } else if (sourceType === 'rss') {
+      fetchedCount = await fetchRSSContent(source, maxPosts)
+    } else if (sourceType === 'api') {
+      fetchedCount = await fetchAPIContent(source, maxPosts)
+    }
+    
+    const processingTime = Date.now() - startTime
+    console.log(`  ✅ ${source.name} completed: ${fetchedCount} posts (${processingTime}ms)`)
+    
+    return { fetchedCount, sourceType }
+    
+  } catch (error) {
+    const processingTime = Date.now() - startTime
+    console.error(`  ❌ ${source.name} failed after ${processingTime}ms:`, error.message)
+    return { fetchedCount: 0, sourceType }
   }
 }
 
@@ -393,8 +356,8 @@ async function fetchRSSContent(source, maxPosts) {
       headers: {
         'User-Agent': 'DevDigest/1.0.0 (Content Aggregator)'
       },
-      // Reduced timeout for faster processing
-      signal: AbortSignal.timeout(8000)
+      // Increased timeout to prevent early breaking
+      signal: AbortSignal.timeout(20000)
     })
 
     if (!response.ok) {
@@ -498,7 +461,7 @@ async function fetchAPIContent(source, maxPosts) {
       
       try {
         const topStoriesResponse = await fetch(source.url, {
-          signal: AbortSignal.timeout(5000) // Reduced timeout
+          signal: AbortSignal.timeout(15000) // Increased timeout
         })
         
         if (!topStoriesResponse.ok) {
@@ -517,7 +480,7 @@ async function fetchAPIContent(source, maxPosts) {
           
           try {
             const storyResponse = await fetch(`https://hacker-news.firebaseio.com/v0/item/${storyId}.json`, {
-              signal: AbortSignal.timeout(3000) // Reduced timeout
+              signal: AbortSignal.timeout(10000) // Increased timeout
             })
             
             if (!storyResponse.ok) {
@@ -583,7 +546,7 @@ async function fetchAPIContent(source, maxPosts) {
     
     const response = await fetch(source.url, {
       headers: source.config?.headers || {},
-      signal: AbortSignal.timeout(8000) // Reduced timeout
+      signal: AbortSignal.timeout(20000) // Increased timeout
     })
     
     if (!response.ok) {
