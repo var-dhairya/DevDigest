@@ -70,12 +70,82 @@ async function fetchRedditContent(source) {
     
     const response = await fetch(url, {
       headers: {
-        'User-Agent': 'DevDigest/1.0.0 (Content Aggregator)'
+        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36 DevDigest/1.0.0'
       }
     })
 
     if (!response.ok) {
-      throw new Error(`Reddit API returned ${response.status}`)
+      if (response.status === 403) {
+        console.log(`    ⚠️ Reddit blocked request (403) - this is common from Vercel. Trying alternative approach...`)
+        // Try with a different User-Agent
+        const altResponse = await fetch(url, {
+          headers: {
+            'User-Agent': 'DevDigest/1.0.0 (by /u/your_username)'
+          }
+        })
+        
+        if (!altResponse.ok) {
+          throw new Error(`Reddit API returned ${altResponse.status} even with alternative User-Agent`)
+        }
+        
+        // Use the alternative response
+        const data = await altResponse.json()
+        const posts = data.data.children || []
+        
+        let fetchedCount = 0
+        for (const post of posts.slice(0, 20)) {
+          const postData = post.data
+          
+          // Check if content already exists to avoid duplicate URL errors
+          const existingContent = await Content.findOne({ url: postData.url })
+          if (existingContent) {
+            console.log(`    ⏭️ Skipping duplicate: ${postData.title}`)
+            continue
+          }
+          
+          // Create content item
+          const content = new Content({
+            title: postData.title,
+            url: postData.url,
+            source: source.name,
+            publishedAt: new Date(postData.created_utc * 1000),
+            summary: postData.selftext?.substring(0, 500) || 'No description available',
+            content: postData.selftext || null,
+            sentiment: 'neutral',
+            category: source.category,
+            difficulty: 'Beginner',
+            readingTime: Math.ceil((postData.title.length + (postData.selftext?.length || 0)) / 200),
+            technologies: extractTechnologies(postData.title + ' ' + (postData.selftext || '')),
+            keyInsights: [],
+            quality: 'medium',
+            isProcessed: false,
+            metadata: {
+              author: postData.author,
+              tags: postData.link_flair_text ? [postData.link_flair_text] : [],
+              wordCount: (postData.title.length + (postData.selftext?.length || 0)),
+              upvotes: postData.ups,
+              comments: postData.num_comments,
+              images: extractImages(postData),
+              isVideo: postData.is_video || false,
+              thumbnail: postData.thumbnail,
+              preview: postData.preview
+            }
+          })
+
+          try {
+            await content.save()
+            fetchedCount++
+            console.log(`    ✅ Saved: ${postData.title}`)
+          } catch (saveError) {
+            console.error(`    ❌ Failed to save: ${postData.title} - ${saveError.message}`)
+          }
+        }
+
+        console.log(`  ✅ Fetched ${fetchedCount} posts from Reddit (alternative method)`)
+        return fetchedCount
+      } else {
+        throw new Error(`Reddit API returned ${response.status}`)
+      }
     }
 
     const data = await response.json()

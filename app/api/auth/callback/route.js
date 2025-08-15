@@ -1,5 +1,8 @@
 import { NextResponse } from 'next/server'
 
+// Force dynamic rendering to prevent static optimization issues
+export const dynamic = 'force-dynamic'
+
 export async function GET(request) {
   try {
     const { searchParams } = new URL(request.url)
@@ -44,8 +47,6 @@ export async function GET(request) {
 
     const tokenData = await tokenResponse.json()
     
-    // Store tokens securely (you might want to use a database or secure session)
-    // For now, we'll redirect with success
     console.log('Reddit OAuth successful, access token received')
     
     // Redirect to success page or back to main app
