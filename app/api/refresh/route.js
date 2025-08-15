@@ -3,11 +3,50 @@ import { connectDB } from '../../../lib/database.js'
 import Source from '../../../models/Source.js'
 import Content from '../../../models/Content.js'
 
+// Reddit OAuth helper function
+async function getRedditAccessToken() {
+  try {
+    const clientId = process.env.REDDIT_CLIENT_ID
+    const clientSecret = process.env.REDDIT_CLIENT_SECRET
+    
+    if (!clientId || !clientSecret) {
+      console.log('⚠️ Reddit credentials not found, falling back to public endpoints')
+      return null
+    }
+    
+    const response = await fetch('https://www.reddit.com/api/v1/access_token', {
+      method: 'POST',
+      headers: {
+        'Authorization': `Basic ${Buffer.from(`${clientId}:${clientSecret}`).toString('base64')}`,
+        'Content-Type': 'application/x-www-form-urlencoded',
+        'User-Agent': 'DevDigest/1.0.0'
+      },
+      body: 'grant_type=client_credentials'
+    })
+    
+    if (!response.ok) {
+      console.log(`⚠️ Reddit OAuth failed: ${response.status}`)
+      return null
+    }
+    
+    const data = await response.json()
+    console.log('✅ Reddit OAuth access token obtained')
+    return data.access_token
+    
+  } catch (error) {
+    console.log(`⚠️ Reddit OAuth error: ${error.message}`)
+    return null
+  }
+}
+
 export async function POST() {
   try {
     console.log('🔄 Starting content refresh...')
     
     await connectDB()
+    
+    // Get Reddit access token for OAuth endpoints
+    const redditToken = await getRedditAccessToken()
     
     const sources = await Source.find({ isActive: true }).sort({ priority: 1 })
     console.log(`📰 Found ${sources.length} active sources`)
@@ -44,7 +83,7 @@ export async function POST() {
         
         if (source.type === 'reddit') {
           sourceStats.reddit.processed++
-          fetchedCount = await fetchRedditContent(source, remainingPosts)
+          fetchedCount = await fetchRedditContent(source, remainingPosts, redditToken)
           if (fetchedCount > 0) {
             sourceStats.reddit.success++
             sourceStats.reddit.totalFetched += fetchedCount
@@ -124,7 +163,7 @@ export async function POST() {
           console.log(`  📊 Second pass: Fetching up to ${maxAdditional} additional posts`)
           
           if (source.type === 'reddit') {
-            fetchedCount = await fetchRedditContent(source, maxAdditional)
+            fetchedCount = await fetchRedditContent(source, maxAdditional, redditToken)
             if (fetchedCount > 0) {
               sourceStats.reddit.totalFetched += fetchedCount
             }
@@ -189,11 +228,38 @@ export async function POST() {
   }
 }
 
-async function fetchRedditContent(source, maxPosts) {
+async function fetchRedditContent(source, maxPosts, token) {
   console.log(`  📱 Fetching Reddit content from r/${source.config.subreddit}`)
   
   try {
-    // Try multiple approaches for Reddit
+    // Try OAuth endpoint first if we have a token
+    if (token) {
+      console.log(`    🔐 Using Reddit OAuth endpoint`)
+      const oauthUrl = `https://oauth.reddit.com/r/${source.config.subreddit}/${source.config.sortBy}?t=${source.config.timeFilter}&limit=${maxPosts}`
+      
+      const response = await fetch(oauthUrl, {
+        headers: {
+          'Authorization': `Bearer ${token}`,
+          'User-Agent': 'DevDigest/1.0.0'
+        }
+      })
+      
+      if (response.ok) {
+        console.log(`    ✅ Reddit OAuth endpoint succeeded`)
+        const data = await response.json()
+        const posts = data.data?.children || []
+        
+        console.log(`    📊 Found ${posts.length} Reddit posts via OAuth`)
+        return await processRedditPosts(posts, maxPosts, source)
+      } else {
+        console.log(`    ⚠️ Reddit OAuth failed with status ${response.status}, falling back to public endpoint`)
+      }
+    }
+    
+    // Fallback to public endpoints (for localhost or when OAuth fails)
+    console.log(`    🌐 Using Reddit public endpoint`)
+    
+    // Try multiple approaches for Reddit public endpoints
     const approaches = [
       // Approach 1: Standard Reddit API
       async () => {
@@ -231,12 +297,12 @@ async function fetchRedditContent(source, maxPosts) {
         approachUsed = i + 1
         response = await approaches[i]()
         if (response.ok) {
-          console.log(`    ✅ Reddit approach ${approachUsed} succeeded`)
+          console.log(`    ✅ Reddit public approach ${approachUsed} succeeded`)
           break
         }
-        console.log(`    ⚠️ Reddit approach ${approachUsed} failed with status ${response.status}`)
+        console.log(`    ⚠️ Reddit public approach ${approachUsed} failed with status ${response.status}`)
       } catch (error) {
-        console.log(`    ⚠️ Reddit approach ${approachUsed} failed: ${error.message}`)
+        console.log(`    ⚠️ Reddit public approach ${approachUsed} failed: ${error.message}`)
       }
     }
 
@@ -246,72 +312,77 @@ async function fetchRedditContent(source, maxPosts) {
     }
 
     const data = await response.json()
-    const posts = data.data.children || []
+    const posts = data.data?.children || []
     
-    console.log(`    📊 Found ${posts.length} Reddit posts`)
-    
-    let fetchedCount = 0
-    for (const post of posts.slice(0, maxPosts)) {
-      // Safety check to prevent infinite loops
-      if (fetchedCount >= maxPosts) {
-        console.log(`    🎯 Reached max posts limit (${maxPosts}) for this source`)
-        break
-      }
-      
-      const postData = post.data
-      
-      // Check if content already exists to avoid duplicate URL errors
-      const existingContent = await Content.findOne({ url: postData.url })
-      if (existingContent) {
-        console.log(`    ⏭️ Skipping duplicate: ${postData.title}`)
-        continue
-      }
-      
-      // Create content item
-      const content = new Content({
-        title: postData.title,
-        url: postData.url,
-        source: source.name,
-        publishedAt: new Date(postData.created_utc * 1000),
-        summary: postData.selftext?.substring(0, 500) || 'No description available',
-        content: postData.selftext || null,
-        sentiment: 'neutral',
-        category: source.category,
-        difficulty: 'Beginner',
-        readingTime: Math.ceil((postData.title.length + (postData.selftext?.length || 0)) / 200),
-        technologies: extractTechnologies(postData.title + ' ' + (postData.selftext || '')),
-        keyInsights: [],
-        quality: 'medium',
-        isProcessed: false,
-        metadata: {
-          author: postData.author,
-          tags: postData.link_flair_text ? [postData.link_flair_text] : [],
-          wordCount: (postData.title.length + (postData.selftext?.length || 0)),
-          upvotes: postData.ups,
-          comments: postData.num_comments,
-          images: extractImages(postData),
-          isVideo: postData.is_video || false,
-          thumbnail: postData.thumbnail,
-          preview: postData.preview
-        }
-      })
-
-      try {
-        await content.save()
-        fetchedCount++
-        console.log(`    ✅ Saved: ${postData.title}`)
-      } catch (saveError) {
-        console.error(`    ❌ Failed to save: ${postData.title} - ${saveError.message}`)
-      }
-    }
-
-    console.log(`  ✅ Fetched ${fetchedCount} posts from Reddit`)
-    return fetchedCount
+    console.log(`    📊 Found ${posts.length} Reddit posts via public endpoint`)
+    return await processRedditPosts(posts, maxPosts, source)
 
   } catch (error) {
     console.error(`  ❌ Reddit fetch failed: ${error.message}`)
     return 0
   }
+}
+
+// Helper function to process Reddit posts
+async function processRedditPosts(posts, maxPosts, source) {
+  let fetchedCount = 0
+  
+  for (const post of posts.slice(0, maxPosts)) {
+    // Safety check to prevent infinite loops
+    if (fetchedCount >= maxPosts) {
+      console.log(`    🎯 Reached max posts limit (${maxPosts}) for this source`)
+      break
+    }
+    
+    const postData = post.data
+    
+    // Check if content already exists to avoid duplicate URL errors
+    const existingContent = await Content.findOne({ url: postData.url })
+    if (existingContent) {
+      console.log(`    ⏭️ Skipping duplicate: ${postData.title}`)
+      continue
+    }
+    
+    // Create content item
+    const content = new Content({
+      title: postData.title,
+      url: postData.url,
+      source: source.name,
+      publishedAt: new Date(postData.created_utc * 1000),
+      summary: postData.selftext?.substring(0, 500) || 'No description available',
+      content: postData.selftext || null,
+      sentiment: 'neutral',
+      category: source.category,
+      difficulty: 'Beginner',
+      readingTime: Math.ceil((postData.title.length + (postData.selftext?.length || 0)) / 200),
+      technologies: extractTechnologies(postData.title + ' ' + (postData.selftext || '')),
+      keyInsights: [],
+      quality: 'medium',
+      isProcessed: false,
+      metadata: {
+        author: postData.author,
+        tags: postData.link_flair_text ? [postData.link_flair_text] : [],
+        wordCount: (postData.title.length + (postData.selftext?.length || 0)),
+        upvotes: postData.ups,
+        comments: postData.num_comments,
+        images: extractImages(postData),
+        isVideo: postData.is_video || false,
+        thumbnail: postData.thumbnail,
+        preview: postData.preview
+      }
+    })
+
+    try {
+      await content.save()
+      fetchedCount++
+      console.log(`    ✅ Saved: ${postData.title}`)
+    } catch (saveError) {
+      console.error(`    ❌ Failed to save: ${postData.title} - ${saveError.message}`)
+    }
+  }
+
+  console.log(`  ✅ Fetched ${fetchedCount} posts from Reddit`)
+  return fetchedCount
 }
 
 async function fetchRSSContent(source, maxPosts) {
