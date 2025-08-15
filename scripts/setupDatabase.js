@@ -238,8 +238,10 @@ const defaultSources = [
     category: 'Development',
     priority: 8,
     config: {
-      url: 'https://dev.to/api/articles?tag=startup&top=1',
-      headers: {}
+      url: 'https://dev.to/api/articles?tag=startup&top=1&per_page=20',
+      headers: {
+        'Accept': 'application/json'
+      }
     },
     filters: {
       includeKeywords: ['startup', 'ai', 'javascript', 'react', 'web', 'development'],
@@ -390,22 +392,6 @@ const defaultSources = [
       includeKeywords: ['startup', 'innovation', 'business', 'entrepreneur', 'ai'],
       excludeKeywords: ['spam', 'advertisement'],
       minWordCount: 150
-    }
-  },
-  {
-    name: 'Medium AI RSS',
-    type: 'rss',
-    url: 'https://medium.com/feed/tag/artificial-intelligence',
-    description: 'Medium AI articles RSS feed',
-    category: 'AI Articles',
-    priority: 1,
-    config: {
-      rssParser: 'default'
-    },
-    filters: {
-      includeKeywords: ['ai', 'artificial intelligence', 'machine learning', 'startup'],
-      excludeKeywords: ['spam', 'advertisement'],
-      minWordCount: 200
     }
   }
 ]

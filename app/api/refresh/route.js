@@ -3,347 +3,414 @@ import { connectDB } from '../../../lib/database.js'
 import Source from '../../../models/Source.js'
 import Content from '../../../models/Content.js'
 
-export async function POST() {
+// Reddit OAuth helper function
+async function getRedditAccessToken() {
   try {
-    console.log('🔄 Starting content refresh...')
+    const clientId = process.env.REDDIT_CLIENT_ID
+    const clientSecret = process.env.REDDIT_CLIENT_SECRET
     
-    // Add timeout handling - 25 seconds to be safe
-    const timeoutPromise = new Promise((_, reject) => {
-      setTimeout(() => reject(new Error('Request timeout')), 25000)
-    })
-    
-    const refreshPromise = performRefresh()
-    
-    // Race between timeout and actual refresh
-    const result = await Promise.race([refreshPromise, timeoutPromise])
-    
-    return NextResponse.json(result)
-    
-  } catch (error) {
-    console.error('❌ Content refresh failed:', error.message)
-    
-    // Always return JSON, never let HTML error pages through
-    return NextResponse.json({
-      success: false,
-      error: error.message || 'An error occurred during refresh',
-      timestamp: new Date().toISOString()
-    }, { status: 500 })
-  }
-}
-
-async function performRefresh() {
-  try {
-    console.log('🔌 Attempting database connection...')
-    await connectDB()
-    console.log('✅ Database connected successfully')
-    
-    const sources = await Source.find({ isActive: true }).sort({ priority: 1 })
-    console.log(`📰 Found ${sources.length} active sources`)
-    
-    if (sources.length === 0) {
-      return {
-        success: true,
-        message: 'No active sources found',
-        data: { 
-          totalFetched: 0,
-          sourcesProcessed: 0,
-          timestamp: new Date().toISOString()
-        }
-      }
-    }
-    
-    let totalFetched = 0
-    let newPostsCount = 0
-    let errors = []
-    const startTime = Date.now()
-    const maxDuration = 15000 // 15 seconds max to leave buffer for response
-    
-    for (const source of sources) {
-      // Check if we're approaching timeout
-      if (Date.now() - startTime > maxDuration) {
-        console.log('⏰ Approaching timeout, stopping refresh process')
-        break
-      }
-      
-      try {
-        console.log(`🔍 Processing source: ${source.name} (${source.type})`)
-        
-        let fetchedCount = 0
-        
-        if (source.type === 'reddit') {
-          fetchedCount = await fetchRedditContent(source)
-        } else if (source.type === 'rss') {
-          fetchedCount = await fetchRSSContent(source)
-        } else if (source.type === 'api') {
-          fetchedCount = await fetchAPIContent(source)
-        }
-        
-        totalFetched += fetchedCount
-        newPostsCount += fetchedCount
-        console.log(`  ✅ Source ${source.name} completed: ${fetchedCount} new items`)
-        
-        // Reduced delay to speed up processing
-        await new Promise(resolve => setTimeout(resolve, 500))
-        
-      } catch (error) {
-        console.error(`❌ Error processing source ${source.name}:`, error.message)
-        errors.push(`${source.name}: ${error.message}`)
-      }
-    }
-    
-    const duration = Date.now() - startTime
-    console.log(`🎉 Content refresh completed in ${duration}ms! Total new posts: ${newPostsCount}`)
-    
-    return {
-      success: true,
-      message: `Successfully fetched ${newPostsCount} new posts from ${sources.length} sources`,
-      data: { 
-        totalFetched: newPostsCount,
-        sourcesProcessed: sources.length,
-        timestamp: new Date().toISOString(),
-        duration: duration,
-        errors: errors.length > 0 ? errors : undefined
-      }
-    }
-    
-  } catch (error) {
-    console.error('❌ Database or connection error:', error.message)
-    console.error('❌ Error stack:', error.stack)
-    
-    // Check if it's a MongoDB connection error
-    if (error.message.includes('MongoNetworkError') || error.message.includes('MongoServerSelectionError')) {
-      throw new Error('Database connection failed. Please check your MongoDB connection.')
-    } else if (error.message.includes('MongoParseError')) {
-      throw new Error('Database configuration error. Please check your MongoDB URI.')
-    } else {
-      throw new Error(`Database error: ${error.message}`)
-    }
-  }
-}
-
-async function fetchRedditContent(source) {
-  console.log(`  📱 Fetching Reddit content from r/${source.config.subreddit}`)
-  
-  try {
-    // Check if we have OAuth tokens
-    if (!source.oauth?.accessToken) {
-      console.log(`  ⚠️ No OAuth access token found for Reddit source ${source.name}`)
-      console.log(`  💡 You need to complete the OAuth flow first`)
-      return 0
-    }
-    
-    // Check if token is expired and try to refresh it
-    if (source.oauth.expiresAt && new Date() > source.oauth.expiresAt) {
-      console.log(`  ⚠️ OAuth token expired for Reddit source ${source.name}`)
-      const refreshed = await refreshRedditToken(source)
-      if (!refreshed) {
-        console.log(`  ❌ Failed to refresh token for ${source.name}`)
-        return 0
-      }
-      // Get the updated source with new token
-      const updatedSource = await Source.findById(source._id)
-      source = updatedSource
-    }
-    
-    // Use OAuth endpoint instead of public JSON endpoint
-    const url = `https://oauth.reddit.com/r/${source.config.subreddit}/${source.config.sortBy}?t=${source.config.timeFilter}&limit=10`
-    
-    const response = await fetch(url, {
-      headers: {
-        'Authorization': `Bearer ${source.oauth.accessToken}`,
-        'User-Agent': 'DevDigest/1.0.0 (by /u/your_username) - https://dev-digest-ag.vercel.app'
-      }
-    })
-
-    if (!response.ok) {
-      if (response.status === 401) {
-        console.log(`  ⚠️ OAuth token invalid for Reddit source ${source.name}`)
-        console.log(`  💡 You need to re-authenticate`)
-        return 0
-      }
-      if (response.status === 403) {
-        console.log(`  ⚠️ Reddit OAuth API returned 403 - this shouldn't happen with proper OAuth`)
-        console.log(`  💡 Check your app permissions and rate limits`)
-        return 0
-      }
-      throw new Error(`Reddit OAuth API returned ${response.status}`)
-    }
-
-    const data = await response.json()
-    const posts = data.data.children || []
-
-    let fetchedCount = 0
-    for (const post of posts.slice(0, 10)) { // Reduced from 20 to 10
-      const postData = post.data
-      
-      // Skip posts without required fields
-      if (!postData.title || !postData.url) {
-        console.log(`    ⏭️ Skipping post without title or URL`)
-        continue
-      }
-      
-      // Check if content already exists to avoid duplicate URL errors
-      const existingContent = await Content.findOne({ url: postData.url })
-      if (existingContent) {
-        console.log(`    ⏭️ Skipping duplicate: ${postData.title}`)
-        continue
-      }
-      
-      // Create content item with validation
-      try {
-        const content = new Content({
-          title: postData.title || 'Untitled Post',
-          url: postData.url,
-          source: source.name,
-          publishedAt: new Date(postData.created_utc * 1000),
-          summary: postData.selftext?.substring(0, 500) || 'No description available',
-          content: postData.selftext || null,
-          sentiment: 'neutral',
-          category: source.category,
-          difficulty: 'Beginner',
-          readingTime: Math.ceil((postData.title.length + (postData.selftext?.length || 0)) / 200),
-          technologies: extractTechnologies(postData.title + ' ' + (postData.selftext || '')),
-          keyInsights: [],
-          quality: 'medium',
-          isProcessed: false,
-          metadata: {
-            author: postData.author || 'Unknown',
-            tags: postData.link_flair_text ? [postData.link_flair_text] : [],
-            wordCount: (postData.title.length + (postData.selftext?.length || 0)),
-            upvotes: postData.ups || 0,
-            comments: postData.num_comments || 0,
-            images: extractImages(postData),
-            isVideo: postData.is_video || false,
-            thumbnail: postData.thumbnail,
-            preview: postData.preview
-          }
-        })
-
-        await content.save()
-        fetchedCount++
-        console.log(`    ✅ Saved: ${postData.title}`)
-      } catch (saveError) {
-        console.error(`    ❌ Failed to save post: ${saveError.message}`)
-        // Continue with next post instead of failing completely
-      }
-    }
-
-    console.log(`  ✅ Fetched ${fetchedCount} posts from Reddit OAuth API`)
-    return fetchedCount
-
-  } catch (error) {
-    console.error(`  ❌ Reddit OAuth API fetch failed: ${error.message}`)
-    return 0
-  }
-}
-
-async function refreshRedditToken(source) {
-  try {
-    console.log(`  🔄 Refreshing expired Reddit OAuth token for ${source.name}`)
-    
-    if (!source.oauth?.refreshToken) {
-      console.log(`  ❌ No refresh token available for ${source.name}`)
-      return false
+    if (!clientId || !clientSecret) {
+      console.log('⚠️ Reddit credentials not found, falling back to public endpoints')
+      return null
     }
     
     const response = await fetch('https://www.reddit.com/api/v1/access_token', {
       method: 'POST',
       headers: {
-        'Authorization': `Basic ${Buffer.from(
-          `${process.env.REDDIT_CLIENT_ID}:${process.env.REDDIT_CLIENT_SECRET}`
-        ).toString('base64')}`,
+        'Authorization': `Basic ${Buffer.from(`${clientId}:${clientSecret}`).toString('base64')}`,
         'Content-Type': 'application/x-www-form-urlencoded',
-        'User-Agent': 'DevDigest/1.0.0 (by /u/your_username) - https://dev-digest-ag.vercel.app'
+        'User-Agent': 'DevDigest/1.0.0'
       },
-      body: new URLSearchParams({
-        grant_type: 'refresh_token',
-        refresh_token: source.oauth.refreshToken
-      })
+      body: 'grant_type=client_credentials'
     })
     
     if (!response.ok) {
-      console.log(`  ❌ Token refresh failed: ${response.status}`)
-      return false
+      console.log(`⚠️ Reddit OAuth failed: ${response.status}`)
+      return null
     }
     
-    const tokenData = await response.json()
-    
-    // Update the source with new tokens
-    await Source.findByIdAndUpdate(source._id, {
-      'oauth.accessToken': tokenData.access_token,
-      'oauth.expiresAt': new Date(Date.now() + (tokenData.expires_in * 1000))
-    })
-    
-    console.log(`  ✅ Token refreshed successfully for ${source.name}`)
-    return true
+    const data = await response.json()
+    console.log('✅ Reddit OAuth access token obtained')
+    return data.access_token
     
   } catch (error) {
-    console.error(`  ❌ Token refresh error: ${error.message}`)
-    return false
+    console.log(`⚠️ Reddit OAuth error: ${error.message}`)
+    return null
   }
 }
 
-async function fetchRSSContent(source) {
+export async function POST() {
+  try {
+    console.log('🔄 Starting content refresh...')
+    
+    await connectDB()
+    
+    // Get Reddit access token for OAuth endpoints
+    const redditToken = await getRedditAccessToken()
+    
+    const sources = await Source.find({ isActive: true }).sort({ priority: 1 })
+    console.log(`📰 Found ${sources.length} active sources`)
+    
+    const MAX_TOTAL_POSTS = 25 // Limit total posts across all sources
+    const MAX_POSTS_PER_SOURCE = Math.max(3, Math.floor(MAX_TOTAL_POSTS / sources.length)) // Fair distribution
+    
+    console.log(`🎯 Target: ${MAX_TOTAL_POSTS} total posts, max ${MAX_POSTS_PER_SOURCE} per source`)
+    
+    let totalFetched = 0
+    let newPostsCount = 0
+    let sourceStats = {
+      reddit: { processed: 0, success: 0, failed: 0, totalFetched: 0 },
+      rss: { processed: 0, success: 0, failed: 0, totalFetched: 0 },
+      api: { processed: 0, success: 0, failed: 0, totalFetched: 0 }
+    }
+    
+    // Group sources by type for parallel processing
+    const redditSources = sources.filter(s => s.type === 'reddit')
+    const rssSources = sources.filter(s => s.type === 'rss')
+    const apiSources = sources.filter(s => s.type === 'api')
+    
+    console.log(`📊 Source distribution: ${redditSources.length} Reddit, ${rssSources.length} RSS, ${apiSources.length} API`)
+    
+    // Parallel fetching with early termination
+    const fetchPromises = []
+    
+    // Add Reddit sources to parallel processing
+    for (const source of redditSources) {
+      const promise = fetchSourceWithTimeout(source, 'reddit', MAX_POSTS_PER_SOURCE, redditToken, sourceStats)
+      fetchPromises.push(promise)
+    }
+    
+    // Add RSS sources to parallel processing
+    for (const source of rssSources) {
+      const promise = fetchSourceWithTimeout(source, 'rss', MAX_POSTS_PER_SOURCE, null, sourceStats)
+      fetchPromises.push(promise)
+    }
+    
+    // Add API sources to parallel processing
+    for (const source of apiSources) {
+      const promise = fetchSourceWithTimeout(source, 'api', MAX_POSTS_PER_SOURCE, null, sourceStats)
+      fetchPromises.push(promise)
+    }
+    
+    console.log(`🚀 Starting parallel fetch for ${fetchPromises.length} sources...`)
+    
+    // Execute all promises in parallel with early termination monitoring
+    const results = await Promise.allSettled(fetchPromises)
+    
+    // Process results and update stats
+    for (let i = 0; i < results.length; i++) {
+      const result = results[i]
+      const source = sources[i]
+      
+      if (result.status === 'fulfilled') {
+        const { fetchedCount, sourceType } = result.value
+        totalFetched += fetchedCount
+        newPostsCount += fetchedCount
+        
+        if (fetchedCount > 0) {
+          sourceStats[sourceType].success++
+          sourceStats[sourceType].totalFetched += fetchedCount
+        } else {
+          sourceStats[sourceType].failed++
+        }
+        
+        console.log(`✅ ${source.name}: ${fetchedCount} posts fetched (Total: ${totalFetched}/${MAX_TOTAL_POSTS})`)
+        
+        // Early termination check
+        if (totalFetched >= MAX_TOTAL_POSTS) {
+          console.log(`🎯 Reached maximum posts limit (${MAX_TOTAL_POSTS}). Stopping processing.`)
+          break
+        }
+      } else {
+        console.error(`❌ ${source.name} failed:`, result.reason)
+        sourceStats[source.type].failed++
+      }
+      
+      sourceStats[source.type].processed++
+    }
+    
+    // Print detailed summary
+    console.log('\n📊 REFRESH SUMMARY:')
+    console.log(`🎯 Total new posts: ${newPostsCount} (Limit: ${MAX_TOTAL_POSTS})`)
+    console.log(`📰 Sources processed: ${sourceStats.reddit.processed + sourceStats.rss.processed + sourceStats.api.processed}`)
+    console.log('\n📈 Source Type Breakdown:')
+    console.log(`🔴 Reddit: ${sourceStats.reddit.processed} processed, ${sourceStats.reddit.success} success, ${sourceStats.reddit.failed} failed, ${sourceStats.reddit.totalFetched} posts`)
+    console.log(`📡 RSS: ${sourceStats.rss.processed} processed, ${sourceStats.rss.success} success, ${sourceStats.rss.failed} failed, ${sourceStats.rss.totalFetched} posts`)
+    console.log(`🔌 API: ${sourceStats.api.processed} processed, ${sourceStats.api.success} success, ${sourceStats.api.failed} failed, ${sourceStats.api.totalFetched} posts`)
+    
+    console.log(`\n🎉 Content refresh completed!`)
+    
+    return NextResponse.json({
+      success: true,
+      message: `Successfully fetched ${newPostsCount} new posts from ${sources.length} sources (Limit: ${MAX_TOTAL_POSTS})`,
+      data: { 
+        totalFetched: newPostsCount,
+        sourcesProcessed: sources.length,
+        sourceStats,
+        maxPostsLimit: MAX_TOTAL_POSTS,
+        maxPostsPerSource: MAX_POSTS_PER_SOURCE,
+        timestamp: new Date().toISOString()
+      }
+    })
+    
+  } catch (error) {
+    console.error('❌ Content refresh failed:', error.message)
+    return NextResponse.json({
+      success: false,
+      error: error.message
+    }, { status: 500 })
+  }
+}
+
+// Helper function to fetch a single source with timeout and early termination
+async function fetchSourceWithTimeout(source, sourceType, maxPosts, redditToken, sourceStats) {
+  const startTime = Date.now()
+  
+  try {
+    console.log(`🔍 Processing ${source.name} (${sourceType})`)
+    
+    let fetchedCount = 0
+    
+    if (sourceType === 'reddit') {
+      fetchedCount = await fetchRedditContent(source, maxPosts, redditToken)
+    } else if (sourceType === 'rss') {
+      fetchedCount = await fetchRSSContent(source, maxPosts)
+    } else if (sourceType === 'api') {
+      fetchedCount = await fetchAPIContent(source, maxPosts)
+    }
+    
+    const processingTime = Date.now() - startTime
+    console.log(`  ✅ ${source.name} completed: ${fetchedCount} posts (${processingTime}ms)`)
+    
+    return { fetchedCount, sourceType }
+    
+  } catch (error) {
+    const processingTime = Date.now() - startTime
+    console.error(`  ❌ ${source.name} failed after ${processingTime}ms:`, error.message)
+    return { fetchedCount: 0, sourceType }
+  }
+}
+
+async function fetchRedditContent(source, maxPosts, token) {
+  console.log(`  📱 Fetching Reddit content from r/${source.config.subreddit}`)
+  
+  try {
+    // Try OAuth endpoint first if we have a token
+    if (token) {
+      console.log(`    🔐 Using Reddit OAuth endpoint`)
+      const oauthUrl = `https://oauth.reddit.com/r/${source.config.subreddit}/${source.config.sortBy}?t=${source.config.timeFilter}&limit=${maxPosts}`
+      
+      const response = await fetch(oauthUrl, {
+        headers: {
+          'Authorization': `Bearer ${token}`,
+          'User-Agent': 'DevDigest/1.0.0'
+        }
+      })
+      
+      if (response.ok) {
+        console.log(`    ✅ Reddit OAuth endpoint succeeded`)
+        const data = await response.json()
+        const posts = data.data?.children || []
+        
+        console.log(`    📊 Found ${posts.length} Reddit posts via OAuth`)
+        return await processRedditPosts(posts, maxPosts, source)
+      } else {
+        console.log(`    ⚠️ Reddit OAuth failed with status ${response.status}, falling back to public endpoint`)
+      }
+    }
+    
+    // Fallback to public endpoints (for localhost or when OAuth fails)
+    console.log(`    🌐 Using Reddit public endpoint`)
+    
+    // Try multiple approaches for Reddit public endpoints
+    const approaches = [
+      // Approach 1: Standard Reddit API
+      async () => {
+        const url = `https://www.reddit.com/r/${source.config.subreddit}/${source.config.sortBy}.json?t=${source.config.timeFilter}&limit=${maxPosts}`
+        const response = await fetch(url, {
+          headers: {
+            'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36 DevDigest/1.0.0'
+          }
+        })
+        return response
+      },
+      // Approach 2: Alternative User-Agent
+      async () => {
+        const url = `https://www.reddit.com/r/${source.config.subreddit}/${source.config.sortBy}.json?t=${source.config.timeFilter}&limit=${maxPosts}`
+        const response = await fetch(url, {
+          headers: {
+            'User-Agent': 'DevDigest/1.0.0 (by /u/your_username)'
+          }
+        })
+        return response
+      },
+      // Approach 3: JSON endpoint with minimal headers
+      async () => {
+        const url = `https://www.reddit.com/r/${source.config.subreddit}/${source.config.sortBy}.json?t=${source.config.timeFilter}&limit=${maxPosts}`
+        const response = await fetch(url)
+        return response
+      }
+    ]
+
+    let response = null
+    let approachUsed = 0
+
+    for (let i = 0; i < approaches.length; i++) {
+      try {
+        approachUsed = i + 1
+        response = await approaches[i]()
+        if (response.ok) {
+          console.log(`    ✅ Reddit public approach ${approachUsed} succeeded`)
+          break
+        }
+        console.log(`    ⚠️ Reddit public approach ${approachUsed} failed with status ${response.status}`)
+      } catch (error) {
+        console.log(`    ⚠️ Reddit public approach ${approachUsed} failed: ${error.message}`)
+      }
+    }
+
+    if (!response || !response.ok) {
+      console.log(`    ❌ All Reddit approaches failed. This is common on localhost.`)
+      return 0
+    }
+
+    const data = await response.json()
+    const posts = data.data?.children || []
+    
+    console.log(`    📊 Found ${posts.length} Reddit posts via public endpoint`)
+    return await processRedditPosts(posts, maxPosts, source)
+
+  } catch (error) {
+    console.error(`  ❌ Reddit fetch failed: ${error.message}`)
+    return 0
+  }
+}
+
+// Helper function to process Reddit posts
+async function processRedditPosts(posts, maxPosts, source) {
+  let fetchedCount = 0
+  
+  for (const post of posts.slice(0, maxPosts)) {
+    // Safety check to prevent infinite loops
+    if (fetchedCount >= maxPosts) {
+      console.log(`    🎯 Reached max posts limit (${maxPosts}) for this source`)
+      break
+    }
+    
+    const postData = post.data
+    
+    // Check if content already exists to avoid duplicate URL errors
+    const existingContent = await Content.findOne({ url: postData.url })
+    if (existingContent) {
+      console.log(`    ⏭️ Skipping duplicate: ${postData.title}`)
+      continue
+    }
+    
+    // Create content item
+    const content = new Content({
+      title: postData.title,
+      url: postData.url,
+      source: source.name,
+      publishedAt: new Date(postData.created_utc * 1000),
+      summary: postData.selftext?.substring(0, 500) || 'No description available',
+      content: postData.selftext || null,
+      sentiment: 'neutral',
+      category: source.category,
+      difficulty: 'Beginner',
+      readingTime: Math.ceil((postData.title.length + (postData.selftext?.length || 0)) / 200),
+      technologies: extractTechnologies(postData.title + ' ' + (postData.selftext || '')),
+      keyInsights: [],
+      quality: 'medium',
+      isProcessed: false,
+      metadata: {
+        author: postData.author,
+        tags: postData.link_flair_text ? [postData.link_flair_text] : [],
+        wordCount: (postData.title.length + (postData.selftext?.length || 0)),
+        upvotes: postData.ups,
+        comments: postData.num_comments,
+        images: extractImages(postData),
+        isVideo: postData.is_video || false,
+        thumbnail: postData.thumbnail,
+        preview: postData.preview
+      }
+    })
+
+    try {
+      await content.save()
+      fetchedCount++
+      console.log(`    ✅ Saved: ${postData.title}`)
+    } catch (saveError) {
+      console.error(`    ❌ Failed to save: ${postData.title} - ${saveError.message}`)
+    }
+  }
+
+  console.log(`  ✅ Fetched ${fetchedCount} posts from Reddit`)
+  return fetchedCount
+}
+
+async function fetchRSSContent(source, maxPosts) {
   console.log(`  📡 Fetching RSS content from ${source.url}`)
   
   try {
     const response = await fetch(source.url, {
       headers: {
-        'User-Agent': 'DevDigest/1.0.0 (Content Aggregator) - https://dev-digest-ag.vercel.app'
-      }
+        'User-Agent': 'DevDigest/1.0.0 (Content Aggregator)'
+      },
+      // Increased timeout to prevent early breaking
+      signal: AbortSignal.timeout(20000)
     })
 
     if (!response.ok) {
-      console.log(`  ⚠️ RSS feed returned ${response.status} - skipping this source`)
-      return 0
+      throw new Error(`RSS feed returned ${response.status}: ${response.statusText}`)
     }
 
     const xmlText = await response.text()
+    
+    // Check if we got valid XML content
+    if (!xmlText || xmlText.length < 100) {
+      throw new Error(`RSS feed returned invalid or empty content (${xmlText?.length || 0} characters)`)
+    }
+    
     const items = await parseRSSXML(xmlText)
+    
+    if (items.length === 0) {
+      console.log(`    ⚠️ No RSS items found or parsed from ${source.url}`)
+      return 0
+    }
     
     console.log(`  📊 Found ${items.length} RSS items`)
     
     let fetchedCount = 0
-    for (const item of items.slice(0, 10)) { // Reduced from 20 to 10
-      // Skip items without required fields
-      if (!item.title || !item.link) {
-        console.log(`    ⏭️ Skipping RSS item without title or link`)
-        continue
+    let duplicateCount = 0
+    let errorCount = 0
+    
+    for (const item of items.slice(0, maxPosts)) {
+      // Safety check to prevent infinite loops
+      if (fetchedCount >= maxPosts) {
+        console.log(`    🎯 Reached max posts limit (${maxPosts}) for this source`)
+        break
       }
       
-      // Check if content already exists to avoid duplicate URL errors
-      const existingContent = await Content.findOne({ url: item.link })
-      if (existingContent) {
-        console.log(`    ⏭️ Skipping duplicate: ${item.title}`)
-        continue
-      }
-      
-      // Try to get better description if it's missing or too short
-      let description = item.description?.substring(0, 500) || ''
-      let fullContent = null
-      
-      if (!description || description.length < 50) {
-        console.log(`    🔍 Fetching full content for: ${item.title}`)
-        try {
-          fullContent = await fetchFullArticleContent(item.link)
-          if (fullContent) {
-            description = fullContent.substring(0, 500)
-            console.log(`    ✅ Got full content (${fullContent.length} chars)`)
-          }
-        } catch (error) {
-          console.log(`    ⚠️ Could not fetch full content: ${error.message}`)
-        }
-      }
-      
-      // Create content item with validation
       try {
+        // Check if content already exists to avoid duplicate URL errors
+        const existingContent = await Content.findOne({ url: item.link })
+        if (existingContent) {
+          duplicateCount++
+          console.log(`    ⏭️ Skipping duplicate: ${item.title}`)
+          continue
+        }
+        
+        // Use RSS description directly - no full content fetching for speed
+        let description = item.description?.substring(0, 500) || 'No description available'
+        
+        // Create content item
         const content = new Content({
-          title: item.title || 'Untitled RSS Post',
+          title: item.title,
           url: item.link,
           source: source.name,
-          publishedAt: new Date(item.pubDate),
-          summary: description || 'No description available',
-          content: fullContent || null,
+          publishedAt: item.pubDate,
+          summary: description,
+          content: null, // No full content for speed
           sentiment: 'neutral',
           category: source.category,
           difficulty: 'Beginner',
@@ -358,21 +425,22 @@ async function fetchRSSContent(source) {
             wordCount: (item.title.length + (description?.length || 0)),
             upvotes: 0,
             comments: 0,
-            hasFullContent: !!fullContent,
-            descriptionSource: fullContent ? 'full_article' : 'rss_feed'
+            hasFullContent: false,
+            descriptionSource: 'rss_feed'
           }
         })
 
         await content.save()
         fetchedCount++
         console.log(`    ✅ Saved: ${item.title}`)
+        
       } catch (saveError) {
-        console.error(`    ❌ Failed to save RSS item: ${saveError.message}`)
-        // Continue with next item instead of failing completely
+        errorCount++
+        console.error(`    ❌ Failed to save: ${item.title} - ${saveError.message}`)
       }
     }
 
-    console.log(`  ✅ Fetched ${fetchedCount} posts from RSS`)
+    console.log(`  ✅ Fetched ${fetchedCount} posts from RSS (${duplicateCount} duplicates, ${errorCount} errors)`)
     return fetchedCount
 
   } catch (error) {
@@ -381,68 +449,167 @@ async function fetchRSSContent(source) {
   }
 }
 
-async function fetchAPIContent(source) {
+async function fetchAPIContent(source, maxPosts) {
   console.log(`  🔌 Fetching API content from ${source.url}`)
   
   try {
-    let response
+    let fetchedCount = 0
+    
     if (source.name === 'Hacker News') {
       // Fetch top stories from HN
-      const topStoriesResponse = await fetch(source.url)
-      const topStories = await topStoriesResponse.json()
+      console.log(`    📰 Fetching Hacker News top stories...`)
       
-      let fetchedCount = 0
-      for (const storyId of topStories.slice(0, 10)) { // Reduced from 20 to 10
-        try {
-          const storyResponse = await fetch(`https://hacker-news.firebaseio.com/v0/item/${storyId}.json`)
-          const story = await storyResponse.json()
-          
-          if (story && story.url) {
-            const content = new Content({
-              title: story.title,
-              url: story.url,
-              source: source.name,
-              publishedAt: new Date(story.time * 1000),
-              summary: `Hacker News post with ${story.score} points`,
-              content: null,
-              sentiment: 'neutral',
-              category: source.category,
-              difficulty: 'Beginner',
-              readingTime: Math.ceil(story.title.length / 200),
-              technologies: extractTechnologies(story.title),
-              keyInsights: [],
-              quality: 'medium',
-              isProcessed: false,
-              metadata: {
-                author: story.by || 'Unknown',
-                tags: [],
-                wordCount: story.title.length,
-                upvotes: story.score || 0,
-                comments: story.descendants || 0
-              }
-            })
-
-            await content.save()
-            fetchedCount++
-          }
-        } catch (error) {
-          console.error(`    ❌ Error fetching HN story ${storyId}:`, error.message)
+      try {
+        const topStoriesResponse = await fetch(source.url, {
+          signal: AbortSignal.timeout(15000) // Increased timeout
+        })
+        
+        if (!topStoriesResponse.ok) {
+          throw new Error(`HN API returned ${topStoriesResponse.status}`)
         }
+        
+        const topStories = await topStoriesResponse.json()
+        console.log(`    📊 Found ${topStories.length} top stories`)
+        
+        for (const storyId of topStories.slice(0, maxPosts)) {
+          // Safety check to prevent infinite loops
+          if (fetchedCount >= maxPosts) {
+            console.log(`    🎯 Reached max posts limit (${maxPosts}) for this source`)
+            break
+          }
+          
+          try {
+            const storyResponse = await fetch(`https://hacker-news.firebaseio.com/v0/item/${storyId}.json`, {
+              signal: AbortSignal.timeout(10000) // Increased timeout
+            })
+            
+            if (!storyResponse.ok) {
+              console.log(`    ⚠️ Failed to fetch HN story ${storyId}: ${storyResponse.status}`)
+              continue
+            }
+            
+            const story = await storyResponse.json()
+            
+            if (story && story.url && story.title) {
+              // Check if content already exists
+              const existingContent = await Content.findOne({ url: story.url })
+              if (existingContent) {
+                console.log(`    ⏭️ Skipping duplicate HN story: ${story.title}`)
+                continue
+              }
+              
+              const content = new Content({
+                title: story.title,
+                url: story.url,
+                source: source.name,
+                publishedAt: new Date(story.time * 1000),
+                summary: `Hacker News post with ${story.score || 0} points`,
+                content: null,
+                sentiment: 'neutral',
+                category: source.category,
+                difficulty: 'Beginner',
+                readingTime: Math.ceil(story.title.length / 200),
+                technologies: extractTechnologies(story.title),
+                keyInsights: [],
+                quality: 'medium',
+                isProcessed: false,
+                metadata: {
+                  author: story.by || 'Unknown',
+                  tags: [],
+                  wordCount: story.title.length,
+                  upvotes: story.score || 0,
+                  comments: story.descendants || 0,
+                  hnId: storyId
+                }
+              })
+
+              await content.save()
+              fetchedCount++
+              console.log(`    ✅ Saved HN story: ${story.title}`)
+            }
+          } catch (error) {
+            console.log(`    ⚠️ Error fetching HN story ${storyId}: ${error.message}`)
+          }
+        }
+        
+        console.log(`  ✅ Fetched ${fetchedCount} posts from Hacker News`)
+        return fetchedCount
+        
+      } catch (error) {
+        console.error(`    ❌ Hacker News API failed: ${error.message}`)
+        return 0
       }
-      
-      console.log(`  ✅ Fetched ${fetchedCount} posts from Hacker News`)
-      return fetchedCount
     }
     
     // For other APIs, try to fetch directly
-    response = await fetch(source.url)
+    console.log(`    🔍 Fetching from generic API: ${source.url}`)
+    
+    const response = await fetch(source.url, {
+      headers: source.config?.headers || {},
+      signal: AbortSignal.timeout(20000) // Increased timeout
+    })
+    
     if (!response.ok) {
-      throw new Error(`API returned ${response.status}`)
+      throw new Error(`API returned ${response.status}: ${response.statusText}`)
     }
     
     const data = await response.json()
-    console.log(`  ✅ Fetched ${data.length || 0} posts from API`)
-    return data.length || 0
+    
+    if (Array.isArray(data)) {
+      console.log(`    📊 Found ${data.length} items from API`)
+      
+      for (const item of data.slice(0, maxPosts)) {
+        // Safety check to prevent infinite loops
+        if (fetchedCount >= maxPosts) {
+          console.log(`    🎯 Reached max posts limit (${maxPosts}) for this source`)
+          break
+        }
+        
+        if (item.title && item.url) {
+          // Check if content already exists
+          const existingContent = await Content.findOne({ url: item.url })
+          if (existingContent) {
+            console.log(`    ⏭️ Skipping duplicate: ${item.title}`)
+            continue
+          }
+          
+          const content = new Content({
+            title: item.title,
+            url: item.url,
+            source: source.name,
+            publishedAt: item.publishedAt ? new Date(item.publishedAt) : new Date(),
+            summary: item.description || item.summary || 'No description available',
+            content: item.content || null,
+            sentiment: 'neutral',
+            category: source.category,
+            difficulty: 'Beginner',
+            readingTime: Math.ceil((item.title.length + (item.description?.length || 0)) / 200),
+            technologies: extractTechnologies(item.title + ' ' + (item.description || '')),
+            keyInsights: [],
+            quality: 'medium',
+            isProcessed: false,
+            metadata: {
+              author: item.author || 'Unknown',
+              tags: item.tags || [],
+              wordCount: (item.title.length + (item.description?.length || 0))
+            }
+          })
+
+          try {
+            await content.save()
+            fetchedCount++
+            console.log(`    ✅ Saved: ${item.title}`)
+          } catch (saveError) {
+            console.error(`    ❌ Failed to save: ${item.title} - ${saveError.message}`)
+          }
+        }
+      }
+    } else {
+      console.log(`    ⚠️ API returned non-array data: ${typeof data}`)
+    }
+    
+    console.log(`  ✅ Fetched ${fetchedCount} posts from API`)
+    return fetchedCount
 
   } catch (error) {
     console.error(`  ❌ API fetch failed: ${error.message}`)
@@ -454,123 +621,48 @@ async function parseRSSXML(xmlText) {
   try {
     const items = []
     
-    // Simple XML parsing for RSS feeds
+    // More robust XML parsing for RSS feeds
     const itemMatches = xmlText.match(/<item[^>]*>([\s\S]*?)<\/item>/gi)
     
     if (itemMatches) {
       for (const itemMatch of itemMatches) {
-        const titleMatch = itemMatch.match(/<title[^>]*>([\s\S]*?)<\/title>/i)
-        const linkMatch = itemMatch.match(/<link[^>]*>([\s\S]*?)<\/link>/i)
-        const descriptionMatch = itemMatch.match(/<description[^>]*>([\s\S]*?)<\/description>/i)
-        const pubDateMatch = itemMatch.match(/<pubDate[^>]*>([\s\S]*?)<\/pubDate>/i)
-        const authorMatch = itemMatch.match(/<author[^>]*>([\s\S]*?)<\/author>/i)
-        
-        if (titleMatch && linkMatch) {
-          items.push({
-            title: titleMatch[1].replace(/<[^>]*>/g, '').trim(),
-            link: linkMatch[1].replace(/<[^>]*>/g, '').trim(),
-            description: descriptionMatch ? descriptionMatch[1].replace(/<[^>]*>/g, '').trim() : '',
-            pubDate: pubDateMatch ? new Date(pubDateMatch[1].replace(/<[^>]*>/g, '').trim()) : new Date(),
-            author: authorMatch ? authorMatch[1].replace(/<[^>]*>/g, '').trim() : 'Unknown'
-          })
+        try {
+          const titleMatch = itemMatch.match(/<title[^>]*>([\s\S]*?)<\/title>/i)
+          const linkMatch = itemMatch.match(/<link[^>]*>([\s\S]*?)<\/link>/i)
+          const descriptionMatch = itemMatch.match(/<description[^>]*>([\s\S]*?)<\/description>/i)
+          const pubDateMatch = itemMatch.match(/<pubDate[^>]*>([\s\S]*?)<\/pubDate>/i)
+          const authorMatch = itemMatch.match(/<author[^>]*>([\s\S]*?)<\/author>/i)
+          
+          if (titleMatch && linkMatch) {
+            const title = titleMatch[1].replace(/<[^>]*>/g, '').trim()
+            const link = linkMatch[1].replace(/<[^>]*>/g, '').trim()
+            
+            // Skip if title or link is empty
+            if (!title || !link || title === 'undefined' || link === 'undefined') {
+              continue
+            }
+            
+            items.push({
+              title: title,
+              link: link,
+              description: descriptionMatch ? descriptionMatch[1].replace(/<[^>]*>/g, '').trim() : '',
+              pubDate: pubDateMatch ? new Date(pubDateMatch[1].replace(/<[^>]*>/g, '').trim()) : new Date(),
+              author: authorMatch ? authorMatch[1].replace(/<[^>]*>/g, '').trim() : 'Unknown'
+            })
+          }
+        } catch (itemError) {
+          console.log(`    ⚠️ Error parsing RSS item: ${itemError.message}`)
+          continue
         }
       }
     }
     
+    console.log(`    📊 Successfully parsed ${items.length} RSS items`)
     return items
   } catch (error) {
     console.error('Error parsing RSS XML:', error.message)
     return []
   }
-}
-
-async function fetchFullArticleContent(url) {
-  try {
-    const response = await fetch(url, {
-      headers: {
-        'User-Agent': 'DevDigest/1.0.0 (Content Aggregator)'
-      },
-      timeout: 10000
-    })
-
-    if (!response.ok) {
-      throw new Error(`HTTP ${response.status}`)
-    }
-
-    const html = await response.text()
-    
-    // Try to extract content from common article selectors
-    const contentSelectors = [
-      'article',
-      '.article-content',
-      '.post-content',
-      '.entry-content',
-      '.content',
-      '.story-body',
-      '.post-text',
-      '.article-body',
-      '.post-body'
-    ]
-    
-    let content = null
-    for (const selector of contentSelectors) {
-      const element = html.match(new RegExp(`<${selector}[^>]*>([\\s\\S]*?)<\\/${selector}>`, 'i'))
-      if (element && element[1]) {
-        content = element[1]
-        break
-      }
-    }
-    
-    if (!content) {
-      // Try div selectors
-      const divSelectors = [
-        '.article',
-        '.post',
-        '.entry',
-        '.story',
-        '.content-area'
-      ]
-      
-      for (const selector of divSelectors) {
-        const element = html.match(new RegExp(`<div[^>]*class="[^"]*${selector.replace('.', '')}[^"]*"[^>]*>([\\s\\S]*?)<\\/div>`, 'i'))
-        if (element && element[1]) {
-          content = element[1]
-          break
-        }
-      }
-    }
-    
-    if (content) {
-      const cleanedContent = cleanHTML(content)
-      return cleanedContent.length > 100 ? cleanedContent : null
-    }
-    
-    return null
-  } catch (error) {
-    console.log(`    ⚠️ Error fetching full content: ${error.message}`)
-    return null
-  }
-}
-
-function cleanHTML(html) {
-  // Remove HTML tags and decode entities
-  let text = html
-    .replace(/<[^>]*>/g, ' ')
-    .replace(/&amp;/g, '&')
-    .replace(/&lt;/g, '<')
-    .replace(/&gt;/g, '>')
-    .replace(/&quot;/g, '"')
-    .replace(/&#39;/g, "'")
-    .replace(/&nbsp;/g, ' ')
-    .replace(/&hellip;/g, '...')
-    .replace(/&mdash;/g, '—')
-    .replace(/&ndash;/g, '–')
-  
-  // Clean up whitespace
-  text = text.replace(/\s+/g, ' ').trim()
-  
-  // Limit length
-  return text.substring(0, 2000)
 }
 
 function extractTechnologies(text) {

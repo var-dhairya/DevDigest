@@ -380,10 +380,18 @@ export default function Home() {
     totalSources: sources.length
   }
 
+  // Deduplicate content to prevent duplicate keys
+  const uniqueContent = content.filter((item, index, self) => 
+    index === self.findIndex(t => t._id === item._id && t.url === item.url)
+  )
+
   // Log stats changes for debugging
   useEffect(() => {
     console.log('📊 Stats updated:', stats)
-  }, [stats])
+    if (content.length !== uniqueContent.length) {
+      console.log(`⚠️ Removed ${content.length - uniqueContent.length} duplicate content items`)
+    }
+  }, [stats, content.length, uniqueContent.length])
 
   return (
     <div className="min-h-screen bg-gray-50 dark:bg-[#0a0a0a]">
@@ -423,7 +431,7 @@ export default function Home() {
                 </div>
               )}
               
-              {!refreshing && content.length === 0 && !loading && (
+              {!refreshing && uniqueContent.length === 0 && !loading && (
                 <div className="text-center py-12 bg-white dark:bg-[#0a0a0a] rounded-xl border border-gray-200 dark:border-[#1a1a1a] shadow-sm">
                   <div className="text-4xl mb-4">📰</div>
                   <h3 className="text-lg font-semibold text-gray-800 dark:text-white mb-2">No Posts Found</h3>
@@ -431,8 +439,8 @@ export default function Home() {
                 </div>
               )}
               
-              {!refreshing && content.map((item, index) => (
-                <div key={item._id} className="post-card bg-white dark:bg-[#0a0a0a] rounded-xl shadow-sm hover:shadow-lg transition-all duration-300 border border-gray-200 dark:border-[#1a1a1a] hover:border-gray-300 dark:hover:border-gray-700 overflow-hidden">
+              {!refreshing && uniqueContent.map((item, index) => (
+                <div key={`${item._id}-${item.url}-${index}`} className="post-card bg-white dark:bg-[#0a0a0a] rounded-xl shadow-sm hover:shadow-lg transition-all duration-300 border border-gray-200 dark:border-[#1a1a1a] hover:border-gray-300 dark:hover:border-gray-700 overflow-hidden">
                   {/* Header Section with Source Badge and Metadata */}
                   <div className="px-6 py-4 border-b border-gray-100 dark:border-[#1a1a1a]">
                     <div className="flex items-center justify-between mb-3">
