@@ -1,5 +1,8 @@
 import { NextResponse } from 'next/server'
 
+// Force dynamic rendering to prevent static optimization issues
+export const dynamic = 'force-dynamic'
+
 export async function GET(request) {
   try {
     // Get search parameters without using request.url
