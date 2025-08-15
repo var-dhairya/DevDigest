@@ -2,6 +2,9 @@
   "version": 2,
   "name": "devdigest",
   "functions": {
+    "app/api/refresh/route.js": {
+      "maxDuration": 60
+    },
     "app/api/**/*.js": {
       "maxDuration": 30
     }

@@ -7,15 +7,64 @@ export async function POST() {
   try {
     console.log('🔄 Starting content refresh...')
     
+    // Add timeout handling - 25 seconds to be safe
+    const timeoutPromise = new Promise((_, reject) => {
+      setTimeout(() => reject(new Error('Request timeout')), 25000)
+    })
+    
+    const refreshPromise = performRefresh()
+    
+    // Race between timeout and actual refresh
+    const result = await Promise.race([refreshPromise, timeoutPromise])
+    
+    return NextResponse.json(result)
+    
+  } catch (error) {
+    console.error('❌ Content refresh failed:', error.message)
+    
+    // Always return JSON, never let HTML error pages through
+    return NextResponse.json({
+      success: false,
+      error: error.message || 'An error occurred during refresh',
+      timestamp: new Date().toISOString()
+    }, { status: 500 })
+  }
+}
+
+async function performRefresh() {
+  try {
+    console.log('🔌 Attempting database connection...')
     await connectDB()
+    console.log('✅ Database connected successfully')
     
     const sources = await Source.find({ isActive: true }).sort({ priority: 1 })
     console.log(`📰 Found ${sources.length} active sources`)
     
+    if (sources.length === 0) {
+      return {
+        success: true,
+        message: 'No active sources found',
+        data: { 
+          totalFetched: 0,
+          sourcesProcessed: 0,
+          timestamp: new Date().toISOString()
+        }
+      }
+    }
+    
     let totalFetched = 0
     let newPostsCount = 0
+    let errors = []
+    const startTime = Date.now()
+    const maxDuration = 15000 // 15 seconds max to leave buffer for response
     
     for (const source of sources) {
+      // Check if we're approaching timeout
+      if (Date.now() - startTime > maxDuration) {
+        console.log('⏰ Approaching timeout, stopping refresh process')
+        break
+      }
+      
       try {
         console.log(`🔍 Processing source: ${source.name} (${source.type})`)
         
@@ -33,32 +82,42 @@ export async function POST() {
         newPostsCount += fetchedCount
         console.log(`  ✅ Source ${source.name} completed: ${fetchedCount} new items`)
         
-        // Small delay to avoid overwhelming servers
-        await new Promise(resolve => setTimeout(resolve, 1000))
+        // Reduced delay to speed up processing
+        await new Promise(resolve => setTimeout(resolve, 500))
         
       } catch (error) {
         console.error(`❌ Error processing source ${source.name}:`, error.message)
+        errors.push(`${source.name}: ${error.message}`)
       }
     }
     
-    console.log(`🎉 Content refresh completed! Total new posts: ${newPostsCount}`)
+    const duration = Date.now() - startTime
+    console.log(`🎉 Content refresh completed in ${duration}ms! Total new posts: ${newPostsCount}`)
     
-    return NextResponse.json({
+    return {
       success: true,
       message: `Successfully fetched ${newPostsCount} new posts from ${sources.length} sources`,
       data: { 
         totalFetched: newPostsCount,
         sourcesProcessed: sources.length,
-        timestamp: new Date().toISOString()
+        timestamp: new Date().toISOString(),
+        duration: duration,
+        errors: errors.length > 0 ? errors : undefined
       }
-    })
+    }
     
   } catch (error) {
-    console.error('❌ Content refresh failed:', error.message)
-    return NextResponse.json({
-      success: false,
-      error: error.message
-    }, { status: 500 })
+    console.error('❌ Database or connection error:', error.message)
+    console.error('❌ Error stack:', error.stack)
+    
+    // Check if it's a MongoDB connection error
+    if (error.message.includes('MongoNetworkError') || error.message.includes('MongoServerSelectionError')) {
+      throw new Error('Database connection failed. Please check your MongoDB connection.')
+    } else if (error.message.includes('MongoParseError')) {
+      throw new Error('Database configuration error. Please check your MongoDB URI.')
+    } else {
+      throw new Error(`Database error: ${error.message}`)
+    }
   }
 }
 
@@ -66,7 +125,7 @@ async function fetchRedditContent(source) {
   console.log(`  📱 Fetching Reddit content from r/${source.config.subreddit}`)
   
   try {
-    const url = `https://www.reddit.com/r/${source.config.subreddit}/${source.config.sortBy}.json?t=${source.config.timeFilter}&limit=20`
+    const url = `https://www.reddit.com/r/${source.config.subreddit}/${source.config.sortBy}.json?t=${source.config.timeFilter}&limit=10`
     
     const response = await fetch(url, {
       headers: {
@@ -82,7 +141,7 @@ async function fetchRedditContent(source) {
     const posts = data.data.children || []
 
     let fetchedCount = 0
-    for (const post of posts.slice(0, 20)) {
+    for (const post of posts.slice(0, 10)) { // Reduced from 20 to 10
       const postData = post.data
       
       // Check if content already exists to avoid duplicate URL errors
@@ -159,7 +218,7 @@ async function fetchRSSContent(source) {
     console.log(`  📊 Found ${items.length} RSS items`)
     
     let fetchedCount = 0
-    for (const item of items.slice(0, 20)) {
+    for (const item of items.slice(0, 10)) { // Reduced from 20 to 10
       // Check if content already exists to avoid duplicate URL errors
       const existingContent = await Content.findOne({ url: item.link })
       if (existingContent) {
@@ -240,7 +299,7 @@ async function fetchAPIContent(source) {
       const topStories = await topStoriesResponse.json()
       
       let fetchedCount = 0
-      for (const storyId of topStories.slice(0, 20)) {
+      for (const storyId of topStories.slice(0, 10)) { // Reduced from 20 to 10
         try {
           const storyResponse = await fetch(`https://hacker-news.firebaseio.com/v0/item/${storyId}.json`)
           const story = await storyResponse.json()
