@@ -129,11 +129,16 @@ async function fetchRedditContent(source) {
     
     const response = await fetch(url, {
       headers: {
-        'User-Agent': 'DevDigest/1.0.0 (Content Aggregator)'
+        'User-Agent': 'DevDigest/1.0.0 (Content Aggregator) - https://dev-digest-ag.vercel.app'
       }
     })
 
     if (!response.ok) {
+      if (response.status === 403) {
+        console.log(`  ⚠️ Reddit API blocked request (403) - this is common from cloud platforms`)
+        console.log(`  💡 Consider using Reddit's official API with authentication`)
+        return 0
+      }
       throw new Error(`Reddit API returned ${response.status}`)
     }
 
@@ -144,6 +149,12 @@ async function fetchRedditContent(source) {
     for (const post of posts.slice(0, 10)) { // Reduced from 20 to 10
       const postData = post.data
       
+      // Skip posts without required fields
+      if (!postData.title || !postData.url) {
+        console.log(`    ⏭️ Skipping post without title or URL`)
+        continue
+      }
+      
       // Check if content already exists to avoid duplicate URL errors
       const existingContent = await Content.findOne({ url: postData.url })
       if (existingContent) {
@@ -151,41 +162,42 @@ async function fetchRedditContent(source) {
         continue
       }
       
-      // Create content item
-      const content = new Content({
-        title: postData.title,
-        url: postData.url,
-        source: source.name,
-        publishedAt: new Date(postData.created_utc * 1000),
-        summary: postData.selftext?.substring(0, 500) || 'No description available',
-        content: postData.selftext || null,
-        sentiment: 'neutral',
-        category: source.category,
-        difficulty: 'Beginner',
-        readingTime: Math.ceil((postData.title.length + (postData.selftext?.length || 0)) / 200),
-        technologies: extractTechnologies(postData.title + ' ' + (postData.selftext || '')),
-        keyInsights: [],
-        quality: 'medium',
-        isProcessed: false,
-        metadata: {
-          author: postData.author,
-          tags: postData.link_flair_text ? [postData.link_flair_text] : [],
-          wordCount: (postData.title.length + (postData.selftext?.length || 0)),
-          upvotes: postData.ups,
-          comments: postData.num_comments,
-          images: extractImages(postData),
-          isVideo: postData.is_video || false,
-          thumbnail: postData.thumbnail,
-          preview: postData.preview
-        }
-      })
-
+      // Create content item with validation
       try {
+        const content = new Content({
+          title: postData.title || 'Untitled Post',
+          url: postData.url,
+          source: source.name,
+          publishedAt: new Date(postData.created_utc * 1000),
+          summary: postData.selftext?.substring(0, 500) || 'No description available',
+          content: postData.selftext || null,
+          sentiment: 'neutral',
+          category: source.category,
+          difficulty: 'Beginner',
+          readingTime: Math.ceil((postData.title.length + (postData.selftext?.length || 0)) / 200),
+          technologies: extractTechnologies(postData.title + ' ' + (postData.selftext || '')),
+          keyInsights: [],
+          quality: 'medium',
+          isProcessed: false,
+          metadata: {
+            author: postData.author || 'Unknown',
+            tags: postData.link_flair_text ? [postData.link_flair_text] : [],
+            wordCount: (postData.title.length + (postData.selftext?.length || 0)),
+            upvotes: postData.ups || 0,
+            comments: postData.num_comments || 0,
+            images: extractImages(postData),
+            isVideo: postData.is_video || false,
+            thumbnail: postData.thumbnail,
+            preview: postData.preview
+          }
+        })
+
         await content.save()
         fetchedCount++
         console.log(`    ✅ Saved: ${postData.title}`)
       } catch (saveError) {
-        console.error(`    ❌ Failed to save: ${postData.title} - ${saveError.message}`)
+        console.error(`    ❌ Failed to save post: ${saveError.message}`)
+        // Continue with next post instead of failing completely
       }
     }
 
@@ -204,12 +216,13 @@ async function fetchRSSContent(source) {
   try {
     const response = await fetch(source.url, {
       headers: {
-        'User-Agent': 'DevDigest/1.0.0 (Content Aggregator)'
+        'User-Agent': 'DevDigest/1.0.0 (Content Aggregator) - https://dev-digest-ag.vercel.app'
       }
     })
 
     if (!response.ok) {
-      throw new Error(`RSS feed returned ${response.status}`)
+      console.log(`  ⚠️ RSS feed returned ${response.status} - skipping this source`)
+      return 0
     }
 
     const xmlText = await response.text()
@@ -219,6 +232,12 @@ async function fetchRSSContent(source) {
     
     let fetchedCount = 0
     for (const item of items.slice(0, 10)) { // Reduced from 20 to 10
+      // Skip items without required fields
+      if (!item.title || !item.link) {
+        console.log(`    ⏭️ Skipping RSS item without title or link`)
+        continue
+      }
+      
       // Check if content already exists to avoid duplicate URL errors
       const existingContent = await Content.findOne({ url: item.link })
       if (existingContent) {
@@ -243,39 +262,40 @@ async function fetchRSSContent(source) {
         }
       }
       
-      // Create content item
-      const content = new Content({
-        title: item.title,
-        url: item.link,
-        source: source.name,
-        publishedAt: new Date(item.pubDate),
-        summary: description || 'No description available',
-        content: fullContent || null,
-        sentiment: 'neutral',
-        category: source.category,
-        difficulty: 'Beginner',
-        readingTime: Math.ceil((item.title.length + (description?.length || 0)) / 200),
-        technologies: extractTechnologies(item.title + ' ' + (description || '')),
-        keyInsights: [],
-        quality: 'medium',
-        isProcessed: false,
-        metadata: {
-          author: item.author || 'Unknown',
-          tags: [],
-          wordCount: (item.title.length + (description?.length || 0)),
-          upvotes: 0,
-          comments: 0,
-          hasFullContent: !!fullContent,
-          descriptionSource: fullContent ? 'full_article' : 'rss_feed'
-        }
-      })
-
+      // Create content item with validation
       try {
+        const content = new Content({
+          title: item.title || 'Untitled RSS Post',
+          url: item.link,
+          source: source.name,
+          publishedAt: new Date(item.pubDate),
+          summary: description || 'No description available',
+          content: fullContent || null,
+          sentiment: 'neutral',
+          category: source.category,
+          difficulty: 'Beginner',
+          readingTime: Math.ceil((item.title.length + (description?.length || 0)) / 200),
+          technologies: extractTechnologies(item.title + ' ' + (description || '')),
+          keyInsights: [],
+          quality: 'medium',
+          isProcessed: false,
+          metadata: {
+            author: item.author || 'Unknown',
+            tags: [],
+            wordCount: (item.title.length + (description?.length || 0)),
+            upvotes: 0,
+            comments: 0,
+            hasFullContent: !!fullContent,
+            descriptionSource: fullContent ? 'full_article' : 'rss_feed'
+          }
+        })
+
         await content.save()
         fetchedCount++
         console.log(`    ✅ Saved: ${item.title}`)
       } catch (saveError) {
-        console.error(`    ❌ Failed to save: ${item.title} - ${saveError.message}`)
+        console.error(`    ❌ Failed to save RSS item: ${saveError.message}`)
+        // Continue with next item instead of failing completely
       }
     }
 
