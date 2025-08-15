@@ -245,7 +245,8 @@ async function fetchRedditContent(source, maxPosts, token, forceRefresh = false)
         strategy, 
         maxPosts - totalFetched, 
         token, 
-        forceRefresh
+        forceRefresh,
+        strategyIndex
       )
       
       if (strategyResult.fetchedCount > 0) {
@@ -280,7 +281,7 @@ async function fetchRedditContent(source, maxPosts, token, forceRefresh = false)
 }
 
 // Helper function to fetch Reddit content with a specific strategy
-async function fetchRedditWithStrategy(source, strategy, targetPosts, token, forceRefresh) {
+async function fetchRedditWithStrategy(source, strategy, targetPosts, token, forceRefresh, strategyIndex) {
   try {
     // Try OAuth endpoint first if we have a token
     if (token) {
